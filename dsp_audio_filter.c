@@ -8,6 +8,7 @@
  * 
 *********************************************************************************/
 #include <stdio.h>
+#include <string.h>
 #include "hardware/clocks.h"
 #include "hardware/adc.h"
 #include "hardware/dma.h"
@@ -22,17 +23,11 @@
 #define I2S_OUT_CLOCK_PIN_BASE 23
 #define I2S_BIT_RATE 16*8000  // 16 bits per sample: 128kbps
 
-// This example uses the default led pin
-// You can change this by defining HELLO_PIO_LED_PIN to use a different gpio
-#if !defined HELLO_PIO_LED_PIN && defined PICO_DEFAULT_LED_PIN
-#define HELLO_PIO_LED_PIN PICO_DEFAULT_LED_PIN
-#endif
-
 // The ADC data buffer, capture_buf and
 // the DAC output buffer, both 16 bit.
 // They are global so that the DMA engines can access them.
-uint16_t capture_buf[FRAME_LENGTH];
-uint16_t output_buf[FRAME_LENGTH];
+int16_t capture_buf[FRAME_LENGTH];
+int16_t output_buf[FRAME_LENGTH];
 
 int main()
 {
@@ -53,11 +48,6 @@ int main()
     printf("Using GPIO pins %u for I2S SD out, %u for BCLK out and %u for LRCLK out\n", I2S_OUT_DATA_PIN, I2S_OUT_DATA_PIN+1, I2S_OUT_DATA_PIN+2);
     i2s_out_program_init(pio, sm, offset, I2S_OUT_DATA_PIN, I2S_OUT_CLOCK_PIN_BASE, I2S_BIT_RATE);
 
-
-    // This will free resources and unload our program
-    pio_remove_program_and_unclaim_sm(&i2s_out_program, pio, sm, offset);
-    return (0);
-    
     // Set up the ADC
     adc_gpio_init(26 + CAPTURE_CHANNEL);
     adc_init();
@@ -91,10 +81,36 @@ int main()
         true           // start immediately
     );
 
+    // Clear and disable the I2S PIO
+    pio_sm_set_enabled(pio, sm, false);
+    pio_sm_clear_fifos(pio, sm);
+    pio_sm_restart(pio, sm);
+
+    // Configure the I2S DMA
+    uint i2s_dma_chan = dma_claim_unused_channel(true);
+    dma_channel_config i2s_dma_cfg = dma_channel_get_default_config(i2s_dma_chan);
+    channel_config_set_transfer_data_size(&i2s_dma_cfg, DMA_SIZE_16);
+    channel_config_set_read_increment(&i2s_dma_cfg, true);
+    channel_config_set_write_increment(&i2s_dma_cfg, false);
+    channel_config_set_dreq(&i2s_dma_cfg, pio_get_dreq(pio, sm, false));
+    dma_channel_configure(
+        i2s_dma_chan, &i2s_dma_cfg,
+        &pio->txf[sm],  // dst
+        output_buf,     // src
+        FRAME_LENGTH,   // transfer count
+        false           // start DMA after the PIO
+    );
+
     // Run the DSP filter.
     printf("Starting capture\n");
     adc_run(true);
+
+    // Start the I2S PIO
+    printf("Starting I2S PIO\n");
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + i2s_out_offset_entry_point));
     
+
+
     // Once DMA finishes, stop any new conversions from starting, and clean up
     // the FIFO in case the ADC was still mid-conversion.
     dma_channel_wait_for_finish_blocking(adc_dma_chan);
@@ -102,9 +118,23 @@ int main()
     adc_run(false);
     adc_fifo_drain();
 
+    // Copy captured data to the output buffer.
+    memcpy((void *)output_buf, (void *)capture_buf, FRAME_LENGTH*sizeof(int16_t));
+
+    dma_channel_start(i2s_dma_chan);
+    printf("I2S DMA channel started\n");
+    
+    dma_channel_wait_for_finish_blocking(i2s_dma_chan);
+
+    // Stop the PIO
+
+    // Now transfer the captured data to the I2S
     // Print samples to stdout
     for (int i = 0; i < FRAME_LENGTH; ++i) {
-        printf("%d\n", capture_buf[i]);
+        printf("%d\n", output_buf[i]);
     }
-    
+
+    dma_channel_cleanup(adc_dma_chan);
+    dma_channel_cleanup(i2s_dma_chan);
+
 }

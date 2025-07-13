@@ -53,12 +53,13 @@
 ;
 ; Data is output at 1 bit per clock. Use clock divider to adjust frequency.
 ; Fractional divider will probably be needed to get correct bit clock period,
-; but for common syslck freqs this should still give a constant word select period.
+; but for common sysclk freqs this should still give a constant word select period.
 ;
 ; One output pin is used for the data output.
-; Two side-set pins are used. 
+; Two side-set pins are used for bit-clock (BCLK) and Left/Right clock (LRCLK)
 ;
-; Send 16 bit words to the PIO for mono, 32 bit words for stereo
+; Send 16 bit words to the PIO for mono, 32 bit words for stereo. For mono,
+; 32 bits are pulled and output, but this is two samples.
 ;
 .program i2s_out
 .side_set 2
@@ -87,13 +88,12 @@ static inline void i2s_out_program_init(PIO pio, uint sm, uint offset, uint data
     sm_config_set_out_pins(&sm_config, data_pin, 1);
     sm_config_set_sideset_pins(&sm_config, clock_pin_base);
     sm_config_set_out_shift(&sm_config, false, true, 32);
-    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);  // Tx only so join ISR and OSR FIFOs together
 
     float div = clock_get_hz(clk_sys) / bit_rate;
     sm_config_set_clkdiv(&sm_config, div);
     pio_sm_init(pio, sm, offset, &sm_config);
     pio_sm_set_pins(pio, sm, 0); // clear pins
-    pio_sm_exec(pio, sm, pio_encode_jmp(offset + i2s_out_offset_entry_point));
 }
 
 %}

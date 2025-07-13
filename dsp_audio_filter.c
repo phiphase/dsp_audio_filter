@@ -20,6 +20,7 @@
 #define ADC_CLKDIV 63  // Fs = 7.9365 ksps
 #define I2S_OUT_DATA_PIN 22
 #define I2S_OUT_CLOCK_PIN_BASE 23
+#define I2S_BIT_RATE 16*8000  // 16 bits per sample: 128kbps
 
 // This example uses the default led pin
 // You can change this by defining HELLO_PIO_LED_PIN to use a different gpio
@@ -44,25 +45,14 @@ int main()
 
     // This will find a free pio and state machine for our program and load it for us
     // We use pio_claim_free_sm_and_add_program_for_gpio_range so we can address gpios >= 32 if needed and supported by the hardware
-    bool success = pio_claim_free_sm_and_add_program_for_gpio_range(&i2s_out_program, &pio, &sm, &offset, HELLO_PIO_LED_PIN, 1, true);
+    bool success = pio_claim_free_sm_and_add_program_for_gpio_range(&i2s_out_program, &pio, &sm, &offset, I2S_OUT_DATA_PIN, 3, true);
     hard_assert(success);
+
     // Configure it to run our program, and start it, using the
     // helper function we included in our .pio file.
-    printf("Using gpio %d\n", HELLO_PIO_LED_PIN);
-    i2s_out_program_init(pio, sm, offset, HELLO_PIO_LED_PIN);
+    printf("Using GPIO pins %u for I2S SD out, %u for BCLK out and %u for LRCLK out\n", I2S_OUT_DATA_PIN, I2S_OUT_DATA_PIN+1, I2S_OUT_DATA_PIN+2);
+    i2s_out_program_init(pio, sm, offset, I2S_OUT_DATA_PIN, I2S_OUT_CLOCK_PIN_BASE, I2S_BIT_RATE);
 
-        // The state machine is now running. Any value we push to its TX FIFO will
-    // appear on the LED pin.
-    // press a key to exit
-    while (getchar_timeout_us(0) == PICO_ERROR_TIMEOUT)
-    {
-        // Blink
-        pio_sm_put_blocking(pio, sm, 1);
-        sleep_ms(500);
-        // Blonk
-        pio_sm_put_blocking(pio, sm, 0);
-        sleep_ms(250);
-    }
 
     // This will free resources and unload our program
     pio_remove_program_and_unclaim_sm(&i2s_out_program, pio, sm, offset);

@@ -36,7 +36,7 @@ pico_sdk_init()
 # Add executable. Default name is the project name, version 0.1
 add_executable(dsp_audio_filter)
 
-pico_generate_pio_header(dsp_audio_filter ${CMAKE_CURRENT_LIST_DIR}/i2s_out.pio)
+pico_generate_pio_header(dsp_audio_filter ${CMAKE_CURRENT_LIST_DIR}/i2s.pio)
 
 target_sources(dsp_audio_filter PRIVATE dsp_audio_filter.c)
 

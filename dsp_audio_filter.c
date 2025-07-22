@@ -177,7 +177,7 @@ int main()
     // Fill the output buffer with data
     for(uint32_t n=0; n < 2*FRAME_LENGTH; n++)
     {
-        output_buff[n] = 0x5555AAAA;
+        output_buff[n] = 0x00000000;
     }
 
     // Configure PIO to run our program, and start it, using the
@@ -204,52 +204,45 @@ int main()
     bool i2s_isr_flag = false;
     uint my_i2s_semaphore = 0;
     uint my_adc_semaphore = 0;
-
+    int capture_base = 0;
+    int output_base = 0;
     while(1)
     {      
-        adc_isr_flag = false;
-        i2s_isr_flag = false;
-
         critical_section_enter_blocking(&myCS);
-            if (i2s_semaphore != my_i2s_semaphore)
-            {
-                i2s_isr_flag = true;
-                my_i2s_semaphore = i2s_semaphore;
-            }
             if (adc_semaphore != my_adc_semaphore)
             {
                 adc_isr_flag = true;
                 my_adc_semaphore = adc_semaphore;
             }            
         critical_section_exit(&myCS);
-        if(i2s_isr_flag || adc_isr_flag)
-        {
-            if (adc_isr_flag)
-                printf("ISR 0 called\n");
-            else
-                printf("ISR 1 called\n");
 
-    /*
-            // If I2S Buffer 0 has been emptied, then fill output_buff 0
-            // from capture buff 0
-            if(my_i2s_semaphore==0)
+        /*
+        * If adc_semaphore==1, then assume that capture_buff[0..FRAME_LEN-1] contains
+        * un-processed data and that output_buff[0..FRAME_LEN-1] has just been sent to I2S so is free.
+        * capture_base = 0, output_base = 0.
+        * 
+        * If adc_semaphore==0, then assume that capture_buff[FRAME_LEN..2*FRAME_LEN-1] contains
+        * un-processed data and that output_buff[FRAME_LEN..2*FRAME_LEN-1] has just been sent to I2S so is free.
+        * capture_base = FRAME_LEN, output_base = FRAME_LEN.
+        */
+        if (adc_isr_flag)
+        {
+            adc_isr_flag = false;
+            capture_base = (1-my_adc_semaphore)*FRAME_LENGTH;
+            output_base = (1-my_adc_semaphore)*FRAME_LENGTH;
+            
+            /*
+            * Write the I2S output data. Bits 31:16 are the Right channel.
+            * Bits 15:0 are the left channel.
+            */
+            for(int n=0; n < FRAME_LENGTH; n++)
             {
-                printf("Fill output_buff[0] from capture_buff[0]\n");
-                for(int i=0; i < FRAME_LENGTH; i++)
-                {
-                    output_buff[i]=capture_buff[i];
-                }
+                output_buff[output_base+n] = (int32_t)capture_buff[capture_base+n];
             }
-            else // fill output_buff 1 from capture buff 1.
-            {
-                printf("Fill output_buff[FRAME_LENGTH] from capture_buff[FRAME_LENGTH]\n");
-                for(int i=0; i < FRAME_LENGTH; i++)
-                {
-                    output_buff[i+FRAME_LENGTH]=capture_buff[i+FRAME_LENGTH];
-                }
-            }
-    */
+            printf("ADC interrupt. capture_base=%u, output_base=%u\n", capture_base, output_base);
         }
+  
+  
     }
     adc_run(false);
     adc_fifo_drain();
@@ -268,15 +261,15 @@ void dma_isr_0()
 {        
     if (!adc_semaphore)
     {
-        dma_hw->ints0 = (1u << adc_dma0_chan); // Clear interrupt status register 0, ints0
-        dma_channel_start(adc_dma1_chan);
+        dma_hw->ints0 = (1u << adc_dma0_chan); // Clear interrupt status reg
         adc_semaphore = 1;
+        dma_channel_start(adc_dma1_chan);
     }
     else
     {
-        dma_hw->ints0 = (1u << adc_dma1_chan); // Clear interrupt status register 0, ints0
-        dma_channel_start(adc_dma0_chan);
+        dma_hw->ints0 = (1u << adc_dma1_chan); // Clear interrupt status reg
         adc_semaphore = 0;
+        dma_channel_start(adc_dma0_chan);
     } 
     
 }

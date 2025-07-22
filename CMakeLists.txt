@@ -48,12 +48,16 @@ pico_enable_stdio_uart(dsp_audio_filter 1)
 pico_enable_stdio_usb(dsp_audio_filter 0)
 
 # Add the standard library to the build
-target_link_libraries(dsp_audio_filter PRIVATE 
+target_link_libraries(
+    dsp_audio_filter
+    PRIVATE 
         pico_stdlib
         hardware_clocks
         hardware_adc
         hardware_dma
-        hardware_pio)
+        hardware_pio
+        pico_multicore
+        )
 
 # Add the standard include files to the build
 target_include_directories(dsp_audio_filter PRIVATE

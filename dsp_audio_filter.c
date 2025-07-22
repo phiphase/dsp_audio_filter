@@ -15,7 +15,9 @@
 #include "hardware/pio.h"
 #include "pico/stdlib.h"
 #include "pico/critical_section.h"
+#include "pico/multicore.h"
 #include "i2s.pio.h"
+#include "dynamicFilters.h"
 
 
 #define FRAME_LENGTH 128
@@ -26,6 +28,25 @@
 #define ADC_CLKDIV 5999  // Fs = 8000sps
 #define I2S_DATA_GPIO 18  // Pin 24, 25, 26
 #define I2S_BIT_RATE 64*8000  // 512 kHz - 32 bits, 8000sps
+
+
+// struct ui_in is used to post User interface updates from the UI to
+// the DSP audio filter
+struct ui_in
+{
+    bool filter_on;
+    bool nc_on;
+    double fl;
+    double fh;
+    double vol;
+};
+
+// struct ui_out is used to post signals from the DSP audio filter to the
+// UI such as LEDs.
+struct ui_out
+{
+    bool led;
+};
 
 // The ADC data buffer, capture_buf (16 bit) and
 // the I2S output buffer (32 bit).
@@ -47,6 +68,14 @@ uint i2s_semaphore;
 uint adc_semaphore;
  
 /*
+ * global structures that enable the core0 (DSP) to communicate with core1 (UI)
+ */
+struct ui_in ui_in;   // core 1 (UI) to core 0 (DSP)
+struct ui_out ui_out; // core 0 (DSP) to core 1 (UI)
+bool ui2dsp_post;  // core 0 reads ui_in
+bool dsp2ui_post;  // cpre 1 reads ui_out
+
+/*
  * Critical section variable. Used to get exclusive access to globals used
  * by ISRs
  */
@@ -58,17 +87,43 @@ critical_section_t myCS;
 void dma_isr_0();
 void dma_isr_1();
 
-int main()
+//-----------------------------------------------------------------------------------------------
+// Core 1 main entry point                                                                       
+// Does nothing at the moment                                                                    
+//-----------------------------------------------------------------------------------------------
+void core1_main()
+{
+    while (1) {        
+        sleep_ms(1000);
+        ui_in.filter_on = true;
+        ui_in.fl = 300;
+        ui_in.fh = 3300;
+        ui_in.nc_on = false;
+        ui2dsp_post = true;
+    }
+}
+
+//-----------------------------------------------------------------------------------------------
+// Core 0 Main entry point                                                                       
+//-----------------------------------------------------------------------------------------------
+void main()
 {
     // PIO for I2S interface
     PIO pio;
     uint sm;
     uint offset;
-
+    bool adc_isr_flag = false;
+    uint my_adc_semaphore = 0;
+    uint capture_base = 0;
+    uint output_base = 0;
+    
     critical_section_init(&myCS);
-
     stdio_init_all();
     setup_default_uart();
+
+    // Initialise the core communications
+    dsp2ui_post = false;
+    ui2dsp_post = false;
 
     /*
      * Set up the ADC
@@ -93,14 +148,13 @@ int main()
     hard_assert(success);
 
     /*
-     * Configure the DMAs. The DMA channels operate in a ping-pong fashion. Two channels for the ADC and 2 channels for the
-     * I2S.
-     * Ring buffers are used. Set the ADC buffer write address on a 256-byte boundary and
+     * Configure the DMAs. Ring buffers are used. Set the ADC buffer write address on a 256-byte boundary and
      * the I2S read address on a 512-byte (I2S) boundary This means that when the buffers start, the DMA pointer LSBs will
      * address the buffer correctly relative to the base address.
      */
     i2s_semaphore = 0;
     adc_semaphore = 0;
+
     adc_dma0_chan = dma_claim_unused_channel(true);
     adc_dma1_chan = dma_claim_unused_channel(true);
     i2s_dma0_chan = dma_claim_unused_channel(true);
@@ -174,16 +228,15 @@ int main()
     irq_set_exclusive_handler(DMA_IRQ_1, dma_isr_1);
     irq_set_enabled(DMA_IRQ_1, true);
 
-    // Fill the output buffer with data
-    for(uint32_t n=0; n < 2*FRAME_LENGTH; n++)
-    {
+    /* 
+     * Fill the output buffer with data. This is to avoid pops and squeaks when
+     * we turn on.
+     */
+    for(uint n=0; n < 2*FRAME_LENGTH; n++)
         output_buff[n] = 0x00000000;
-    }
 
-    // Configure PIO to run our program, and start it, using the
+    // Configure PIO to run our pI2S interface, using the
     // helper function we included in our .pio file.
-    printf("I2S data using GPIO %d\n", I2S_DATA_GPIO);
-    printf("I2S Clocks using GPIOs %d (BCLK) and %d (LRCLK)\n", I2S_DATA_GPIO+1, I2S_DATA_GPIO+2);
     i2s_program_init(pio, sm, offset, I2S_DATA_GPIO, I2S_BIT_RATE);
 
     // Start the ADC
@@ -193,27 +246,23 @@ int main()
     dma_channel_start(adc_dma0_chan);
     dma_channel_start(i2s_dma0_chan);
 
-    printf("ADC DMA channel started\n");
-    printf("I2S DMA channel started\n");
-    printf("adc_dma0_chan=%d\n", adc_dma0_chan);
-    printf("adc_dma1_chan=%d\n", adc_dma1_chan);
-    printf("i2s_dma0_chan=%d\n", i2s_dma0_chan);
-    printf("i2s_dma1_chan=%d\n", i2s_dma1_chan);
+    /*
+     * Start the other core that deals with the UI
+     */
+    multicore_launch_core1(core1_main);
 
-    bool adc_isr_flag = false;
-    bool i2s_isr_flag = false;
-    uint my_i2s_semaphore = 0;
-    uint my_adc_semaphore = 0;
-    int capture_base = 0;
-    int output_base = 0;
+    /*-------------------------------------------------------------------------------------------*/
+    /* The main processing loop                                                                  */
+    /*-------------------------------------------------------------------------------------------*/
     while(1)
     {      
+        // Detect an edge on the ADC semaphore to detect an aDC DMA interrupt.
         critical_section_enter_blocking(&myCS);
-            if (adc_semaphore != my_adc_semaphore)
-            {
-                adc_isr_flag = true;
-                my_adc_semaphore = adc_semaphore;
-            }            
+        if (adc_semaphore != my_adc_semaphore)
+        {
+            adc_isr_flag = true;
+            my_adc_semaphore = adc_semaphore;
+        }
         critical_section_exit(&myCS);
 
         /*
@@ -228,22 +277,25 @@ int main()
         if (adc_isr_flag)
         {
             adc_isr_flag = false;
-            capture_base = (1-my_adc_semaphore)*FRAME_LENGTH;
-            output_base = (1-my_adc_semaphore)*FRAME_LENGTH;
             
             /*
-            * Write the I2S output data. Bits 31:16 are the Right channel.
-            * Bits 15:0 are the left channel.
-            */
+             * Write the I2S output data. Bits 31:16 are the Right channel.
+             * Bits 15:0 are the left channel.
+             */
+            capture_base = (1-my_adc_semaphore)*FRAME_LENGTH;
+            output_base = (1-my_adc_semaphore)*FRAME_LENGTH;
             for(int n=0; n < FRAME_LENGTH; n++)
             {
                 output_buff[output_base+n] = (int32_t)capture_buff[capture_base+n];
             }
             printf("ADC interrupt. capture_base=%u, output_base=%u\n", capture_base, output_base);
         }
-  
-  
+ 
     }
+
+    /*
+     * Cleanup
+     */
     adc_run(false);
     adc_fifo_drain();
     dma_channel_cleanup(adc_dma0_chan);
@@ -252,6 +304,8 @@ int main()
     dma_channel_cleanup(i2s_dma1_chan);
 
 }
+
+
 
 /*
  * DMA IRQ0 Interrupt Service Routine that handles

@@ -21,9 +21,9 @@
 
 
 #define FRAME_LENGTH 128
-#define ADC_RING_BITS 9
-#define I2S_RING_BITS 10
-#define ADC_GPIO 26
+#define ADC_RING_BITS 8
+#define I2S_RING_BITS 9
+#define ADC_GPIO 26 // Pin 31
 #define CAPTURE_CHANNEL 0
 #define ADC_CLKDIV 5999  // Fs = 8000sps
 #define I2S_DATA_GPIO 18  // Pin 24, 25, 26
@@ -113,7 +113,9 @@ void main()
     uint sm;
     uint offset;
     bool adc_isr_flag = false;
+    bool i2s_isr_flag = false;
     uint my_adc_semaphore = 0;
+    uint my_i2s_semaphore = 0;
     uint capture_base = 0;
     uint output_base = 0;
     
@@ -284,11 +286,13 @@ void main()
              */
             capture_base = (1-my_adc_semaphore)*FRAME_LENGTH;
             output_base = (1-my_adc_semaphore)*FRAME_LENGTH;
+
             for(int n=0; n < FRAME_LENGTH; n++)
             {
-                output_buff[output_base+n] = (int32_t)capture_buff[capture_base+n];
+                int16_t x = capture_buff[capture_base+n] << 3; // 12 to 16 bits
+                output_buff[output_base+n] = (int32_t)((x << 16) | x);
             }
-            printf("ADC interrupt. capture_base=%u, output_base=%u\n", capture_base, output_base);
+            //printf("ADC interrupt. capture_base=%u, output_base=%u\n", capture_base, output_base);
         }
  
     }

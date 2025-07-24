@@ -71,9 +71,12 @@ static inline void i2s_program_init(PIO pio, uint sm, uint offset, uint pin, uin
     // before the next pull.
     sm_config_set_out_shift(&c, false, true, 32);
 
-    // Set the clock division so the pulses happen slower.
-    float div = clock_get_hz(clk_sys) / bitRate;
-    sm_config_set_clkdiv(&c, div);
+    // Set the clock division so the pulses happen slower. The int/Fractional
+    // version is used.
+    float div = (float)clock_get_hz(clk_sys) / (float)bitRate;
+    uint32_t div_int = (int)div;
+    uint8_t div_frac = (div-(float)div_int)*256;
+    sm_config_set_clkdiv_int_frac8 (&c, div_int, div_frac); 
 
     // Load our configuration, and jump to the start of the program
     pio_sm_init(pio, sm, offset, &c);

@@ -17,7 +17,7 @@
 #include "pico/critical_section.h"
 #include "pico/multicore.h"
 #include "i2s.pio.h"
-#include "dynamicFilters.h"
+#include "arm_math.h"
 
 
 #define FRAME_LENGTH 128
@@ -113,9 +113,7 @@ void main()
     uint sm;
     uint offset;
     bool adc_isr_flag = false;
-    bool i2s_isr_flag = false;
     uint my_adc_semaphore = 0;
-    uint my_i2s_semaphore = 0;
     uint capture_base = 0;
     uint output_base = 0;
     
@@ -291,6 +289,7 @@ void main()
             {
                 int16_t x = capture_buff[capture_base+n] << 3; // 12 to 16 bits
                 output_buff[output_base+n] = (int32_t)((x << 16) | x);
+                
             }
             //printf("ADC interrupt. capture_base=%u, output_base=%u\n", capture_base, output_base);
         }

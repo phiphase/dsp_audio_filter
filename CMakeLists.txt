@@ -28,6 +28,18 @@ set(PICO_BOARD pico2 CACHE STRING "Board type")
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
+
+# Pull in the CMSIS DSP library from the ARM Github repo, specificaly v1.16.2.
+set(CMSISCORE ${USERHOME}/.pico-sdk/sdk/2.1.1/src/rp2_common/cmsis/stub/CMSIS/Core)
+set(DISABLEFLOAT16 ON)
+include(FetchContent)
+FetchContent_Declare(cmsisdsp
+    GIT_REPOSITORY https://github.com/ARM-software/CMSIS-DSP.git
+    GIT_TAG "v1.16.2"
+    )
+FetchContent_MakeAvailable(cmsisdsp)
+
+
 project(dsp_audio_filter C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
@@ -47,7 +59,7 @@ pico_set_program_version(dsp_audio_filter "0.1")
 pico_enable_stdio_uart(dsp_audio_filter 1)
 pico_enable_stdio_usb(dsp_audio_filter 0)
 
-# Add the standard library to the build
+# Add the standard library to the build including the CMSIS-DSP library
 target_link_libraries(
     dsp_audio_filter
     PRIVATE 
@@ -57,11 +69,15 @@ target_link_libraries(
         hardware_dma
         hardware_pio
         pico_multicore
+        ${cmsisdsp_BINARY_DIR}/Source/libCMSISDSP.a
         )
 
-# Add the standard include files to the build
+# Add the standard include files to the build including the CMSIS-DSP header
+# files
 target_include_directories(dsp_audio_filter PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
+         ${cmsisdsp_SOURCE_DIR}/Include
+         ${USERHOME}/.pico-sdk/sdk/2.1.1/src/rp2_common/cmsis/stub/CMSIS/Core/Include
 )
 
 pico_add_extra_outputs(dsp_audio_filter)

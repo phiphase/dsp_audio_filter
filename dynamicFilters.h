@@ -6,6 +6,7 @@
   * Description:
   *    Dynamic Calculation of FIR Filters based on Bob Mailing's routines
   *    This file is part of RadioDSP MINI project.
+  *    Converted doubles to floats so that a FPU can be used.
   *
   *****************************************************************************
   */
@@ -25,14 +26,14 @@
     Bandstop: wsfirBS(h, N, WINDOW, fc1, fc2)
 
   where:
-    h (double[N]):  filter coefficients will be written to this array
+    h (float[N]):  filter coefficients will be written to this array
     N (int):    number of taps
-    WINDOW (int): Window (W_BLACKMAN, W_HANNING, or W_HAMMING)
-    fc (double):  cutoff (0 < fc < 0.5, fc = f/fs)
+    WINDOW (int): Window (W_BLACKMAN, W_HANNINGING, or W_HAMMING)
+    fc (float):  cutoff (0 < fc < 0.5, fc = f/fs)
             --> for fs=48kHz and cutoff f=12kHz, fc = 12k/48k => 0.25
 
-    fc1 (double): low cutoff (0 < fc < 0.5, fc = f/fs)
-    fc2 (double): high cutoff (0 < fc < 0.5, fc = f/fs)
+    fc1 (float): low cutoff (0 < fc < 0.5, fc = f/fs)
+    fc2 (float): high cutoff (0 < fc < 0.5, fc = f/fs)
 
 
   Windows included here are Blackman, Hanning, and Hamming. Other windows can be
@@ -64,22 +65,32 @@
 
 // ID's for window type contstants
 static const int W_BLACKMAN =  1;
-static const int W_HANNING =   2;
-static const int W_HAMMING =   3;
-
+static const int W_HANNING  =  2;
+static const int W_HAMMING  =  3;
 
 // Function prototypes
-void audioFilter(double h[], const int N, const int TYPE, const int WINDOW,  double fc1,  double fc2, double fc);
-void bandpass(double h[], const int N, const int WINDOW, double fc1,  double fc2);
-void wsfirLP(double h[], const int N, const int WINDOW, double fc);
-void wsfirHP(double h[], const int N, const int WINDOW, double fc);
-void wsfirBS(double h[], const int N, const int WINDOW, double fc1,  double fc2);
-void wsfirBP(double h[], const int N, const int WINDOW,  double fc1, double fc2);
-void genSinc(double sinc[], const int N, double fc);
-void wBlackman(double w[], const int N);
-void wHanning(double w[], const int N);
-void wHamming(double w[], const int N);
-void convertCoeffToInt16(double in[], int out[], const int N);
+void audioFilter(float h[], const int N, const int TYPE, const int WINDOW,  float fc1,  float fc2, float fc);
+void bandpass(float h[], const int N, const int WINDOW, float fc1,  float fc2);
+void wsfirLP(float h[], const int N, const int WINDOW, float fc);
+void wsfirHP(float h[], const int N, const int WINDOW, float fc);
+void wsfirBS(float h[], const int N, const int WINDOW, float fc1,  float fc2);
+void wsfirBP(float h[], const int N, const int WINDOW,  float fc1, float fc2);
+void genSinc(float sinc[], const int N, float fc);
+void wBlackman(float w[], const int N);
+void wHanning(float w[], const int N);
+void wHamming(float w[], const int N);
+
+void convertCoeffToInt16(float in[], int out[], const int N);
+
+// Added Kaiser window filter functions.
+float bessi0(float x);
+void wKaiser(float w[], const int N, float alpha, float beta);
+int kaiserFindN(float AdB, float t);
+void wsfirKLP(float h[], const int N, float fc, float AdB);
+void wsfirKHP(float h[], const int N, float fc, float AdB);
+void wsfirKBS(float h[], const int N, float fc1,  float fc2, float AdB);
+void wsfirKBP(float h[], const int N, float fc1,  float fc2, float AdB);
+
 
 
 #endif

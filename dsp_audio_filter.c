@@ -18,16 +18,18 @@
 #include "pico/multicore.h"
 #include "i2s.pio.h"
 #include "arm_math.h"
+#include "dynamicFilters.h"
 
 
 #define FRAME_LENGTH 128
 #define ADC_RING_BITS 8
 #define I2S_RING_BITS 9
 #define ADC_GPIO 26 // Pin 31
-#define CAPTURE_CHANNEL 0
-#define ADC_CLKDIV 5999  // Fs = 8000sps
 #define I2S_DATA_GPIO 18  // Pin 24, 25, 26
-#define I2S_BIT_RATE 64*8000  // 512 kHz - 32 bits, 8000sps
+#define FS 8000  // Sample rate
+#define CAPTURE_CHANNEL 0
+#define ADC_CLKDIV (48000000/FS)-1 //5999
+#define I2S_BIT_RATE 64*FS  // 32 bits
 
 
 // struct ui_in is used to post User interface updates from the UI to
@@ -89,18 +91,40 @@ void dma_isr_1();
 
 //-----------------------------------------------------------------------------------------------
 // Core 1 main entry point                                                                       
-// Does nothing at the moment                                                                    
+// Core 1 handles the user interface and creates the filter coefficients.                                                                   
 //-----------------------------------------------------------------------------------------------
 void core1_main()
 {
-    while (1) {        
-        sleep_ms(1000);
-        ui_in.filter_on = true;
-        ui_in.fl = 300;
-        ui_in.fh = 3300;
-        ui_in.nc_on = false;
-        ui2dsp_post = true;
+ 
+    const float fs = FS;
+    float fc1 = 600;
+    float fc2 = 900;
+    float b = 80;
+    float AdB = 50;
+
+    printf("Core 1 up\n");
+    sleep_ms(1000);
+    
+    
+    int NTAPS = kaiserFindN(AdB, b/fs);
+    float h[NTAPS];
+    printf("NTAPS=%d\n", NTAPS);
+    wsfirKBP(h, NTAPS, fc1/fs, fc2/fs, AdB);
+/*
+    int NTAPS = 64;
+    float h[NTAPS];
+    wsfirLP(h, NTAPS, W_HANNING, fc2/fs);
+*/
+
+
+    for(int n=0; n < NTAPS; n++)
+    {
+        printf("%f\n",h[n]);
     }
+
+     printf("Core 1 exiting\n");
+    sleep_ms(1000);
+    return;
 }
 
 //-----------------------------------------------------------------------------------------------

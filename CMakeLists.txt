@@ -50,7 +50,7 @@ add_executable(dsp_audio_filter)
 
 pico_generate_pio_header(dsp_audio_filter ${CMAKE_CURRENT_LIST_DIR}/i2s.pio)
 
-target_sources(dsp_audio_filter PRIVATE dsp_audio_filter.c)
+target_sources(dsp_audio_filter PRIVATE dsp_audio_filter.c dynamicFilters.c)
 
 pico_set_program_name(dsp_audio_filter "dsp_audio_filter")
 pico_set_program_version(dsp_audio_filter "0.1")

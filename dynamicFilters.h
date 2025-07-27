@@ -48,6 +48,8 @@
 #ifndef _WSFIR_H_
 #define _WSFIR_H_
 
+#include "pico/stdlib.h"  // Included so that the int16_t/uint16_t/float32_t types are available.
+
 #define _USE_MATH_DEFINES  
 #include <math.h> 
 
@@ -80,7 +82,7 @@ void wBlackman(float w[], const int N);
 void wHanning(float w[], const int N);
 void wHamming(float w[], const int N);
 
-void convertCoeffToInt16(float in[], int out[], const int N);
+void convertCoeffToInt16(float in[], int16_t out[], const int N);
 
 // Added Kaiser window filter functions.
 float bessi0(float x);

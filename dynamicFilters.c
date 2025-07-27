@@ -382,7 +382,7 @@ void coeffConvert(float in[], float out[], const int N)
         out[j] = in[j];
 }
 
-void convertCoeffToInt16(float in[], int out[], const int N)
+void convertCoeffToInt16(float in[], int16_t out[], const int N)
 {
     int acc =0;
     for (int j = 0; j < N; j++)

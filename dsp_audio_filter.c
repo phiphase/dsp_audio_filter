@@ -5,20 +5,27 @@
  * to an external I2S DAC
  * DMA is used to transfer samples from the ADC to the capture buffer, and from
  * the output buffer to the  I2S which is implemented in a PIO.
+ * Core 0 does the DSP signal path. Core 1 does the user interface and filter
+ * coefficient generation.
+ * 
+ * Note: float32_t is an arm_math type. The standart C/C++ definition is float
+ * doubles are used for non-time-critical variables that are non-integer.
  * 
 *********************************************************************************/
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "hardware/clocks.h"
 #include "hardware/adc.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
+#include "hardware/sync.h"
 #include "pico/stdlib.h"
 #include "pico/critical_section.h"
 #include "pico/multicore.h"
 #include "i2s.pio.h"
 #include "arm_math.h"
-#include "dynamicFilters.h"
+#include "filter.h"
 
 
 #define FRAME_LENGTH 128
@@ -30,38 +37,21 @@
 #define CAPTURE_CHANNEL 0
 #define ADC_CLKDIV (48000000/FS)-1 //5999
 #define I2S_BIT_RATE 64*FS  // 32 bits
+#define MAX_TAPS 500  // Maximum number of taps of a filter
+#define SPIN_LOCK_ID 1
 
-
-// struct ui_in is used to post User interface updates from the UI to
-// the DSP audio filter
-struct ui_in
-{
-    bool filter_on;
-    bool nc_on;
-    double fl;
-    double fh;
-    double vol;
-};
-
-// struct ui_out is used to post signals from the DSP audio filter to the
-// UI such as LEDs.
-struct ui_out
-{
-    bool led;
-};
-
-// The ADC data buffer, capture_buf (16 bit) and
-// the I2S output buffer (32 bit).
-// They are global so that the DMA engines can access them. They are aligned to boundaries
-// so that ring buffering can be used.
-
-// ADC capture buffer is 16 bits
+/*
+ * The ADC data buffer, capture_buf (16 bit) and
+ * the I2S output buffer (32 bit).
+ * They are global so that the DMA engines can access them. They are aligned to boundaries
+ * so that ring buffering can be used.
+ */
 int16_t capture_buff[2*FRAME_LENGTH] __attribute__((aligned(sizeof(int16_t)*2*FRAME_LENGTH)));
-
-// I2S output buffer is 32 bits
 int32_t output_buff[2*FRAME_LENGTH] __attribute__((aligned(sizeof(int32_t)*2*FRAME_LENGTH)));
 
-// Global so that interrupt handlers have access
+/*
+ * Global so that interrupt handlers have access
+ */
 uint adc_dma0_chan;
 uint adc_dma1_chan;
 uint i2s_dma0_chan;
@@ -70,69 +60,67 @@ uint i2s_semaphore;
 uint adc_semaphore;
  
 /*
- * global structures that enable the core0 (DSP) to communicate with core1 (UI)
+ * Global structures that enable the core-0 (DSP) to communicate with core-1 (UI)
  */
-struct ui_in ui_in;   // core 1 (UI) to core 0 (DSP)
-struct ui_out ui_out; // core 0 (DSP) to core 1 (UI)
-bool ui2dsp_post;  // core 0 reads ui_in
-bool dsp2ui_post;  // cpre 1 reads ui_out
+const uint32_t uiFilterUpdate = 1;
+const uint32_t uiNCOn         = 2;
+const uint32_t uiNCOff        = 3;
+spin_lock_t *lock;
+float_t h[MAX_TAPS];
+uint16_t ntaps;
+
 
 /*
- * Critical section variable. Used to get exclusive access to globals used
- * by ISRs
- */
-critical_section_t myCS;
-
-/*
- * The DMA interrupt handlers
+ * The DMA interrupt handlers and the critical section object
  */
 void dma_isr_0();
 void dma_isr_1();
+critical_section_t myCS;
 
 //-----------------------------------------------------------------------------------------------
 // Core 1 main entry point                                                                       
-// Core 1 handles the user interface and creates the filter coefficients.                                                                   
+// Core 1 handles the user interface and creates the filter coefficients.  It passes commands
+// to core-0 when the user interface is changed.                                                                 
 //-----------------------------------------------------------------------------------------------
 void core1_main()
 {
- 
-    const float fs = FS;
-    float fc1 = 600;
-    float fc2 = 900;
-    float b = 80;
-    float AdB = 50;
-
+    const float_t fs = FS;       // Hz Sample rate
+    float_t fc1 = 600;           // Hz lower corner frequency
+    float_t fc2 = 900;           // Hz upper corner frequency
+    float_t b = 80;              // Hz transition bandwidth
+    float_t AdB = 50;            // dB stop-band attenuation
+    
     printf("Core 1 up\n");
-    sleep_ms(1000);
-    
-    
-    int NTAPS = kaiserFindN(AdB, b/fs);
-    float h[NTAPS];
-    printf("NTAPS=%d\n", NTAPS);
-    wsfirKBP(h, NTAPS, fc1/fs, fc2/fs, AdB);
+        
+    // h and ntaps are global
+    uint32_t save = spin_lock_blocking(lock);
+    ntaps = kaiserFindN(AdB, b/fs);
+    wsfirKBP(h, ntaps, fc1/fs, fc2/fs, AdB);
+    spin_unlock(lock, save);
+    multicore_fifo_push_blocking(uiFilterUpdate);
+
 /*
-    int NTAPS = 64;
-    float h[NTAPS];
-    wsfirLP(h, NTAPS, W_HANNING, fc2/fs);
+    // For MATLAB
+    printf("ntaps=%u\n", ntaps);
+    for(uint i=0; i < ntaps; i++)
+        printf("%f\n",h[i]);
 */
-
-
-    for(int n=0; n < NTAPS; n++)
+    while(1)
     {
-        printf("%f\n",h[n]);
+        sleep_ms(100);
     }
 
-     printf("Core 1 exiting\n");
+    printf("Core 1 exiting\n");
     sleep_ms(1000);
     return;
 }
 
 //-----------------------------------------------------------------------------------------------
-// Core 0 Main entry point                                                                       
+// Core 0 Main entry point
+// Core 0 handles the signal path                                                                     
 //-----------------------------------------------------------------------------------------------
 void main()
 {
-    // PIO for I2S interface
     PIO pio;
     uint sm;
     uint offset;
@@ -140,14 +128,21 @@ void main()
     uint my_adc_semaphore = 0;
     uint capture_base = 0;
     uint output_base = 0;
-    
-    critical_section_init(&myCS);
+    arm_fir_instance_q15 FIRFilterObj;
+    q15_t coeffs[MAX_NTAPS];
+    q15_t state[MAX_NTAPS];
+    q15_t tmpIn[FRAME_LENGTH];
+    q15_t tmpOut[FRAME_LENGTH];
+
     stdio_init_all();
     setup_default_uart();
-
-    // Initialise the core communications
-    dsp2ui_post = false;
-    ui2dsp_post = false;
+    lock = spin_lock_init(SPIN_LOCK_ID);
+    critical_section_init(&myCS);
+   
+    /*
+     * Start the other core that deals with the UI
+     */
+    multicore_launch_core1(core1_main);
 
     /*
      * Set up the ADC
@@ -257,7 +252,7 @@ void main()
      * we turn on.
      */
     for(uint n=0; n < 2*FRAME_LENGTH; n++)
-        output_buff[n] = 0x00000000;
+        output_buff[n] = 0x00000000; 
 
     // Configure PIO to run our pI2S interface, using the
     // helper function we included in our .pio file.
@@ -270,16 +265,31 @@ void main()
     dma_channel_start(adc_dma0_chan);
     dma_channel_start(i2s_dma0_chan);
 
-    /*
-     * Start the other core that deals with the UI
-     */
-    multicore_launch_core1(core1_main);
-
     /*-------------------------------------------------------------------------------------------*/
     /* The main processing loop                                                                  */
     /*-------------------------------------------------------------------------------------------*/
     while(1)
     {      
+        /*
+         * Check for commands from core-1.
+         */
+        if (multicore_fifo_rvalid())
+        {   
+            switch(multicore_fifo_pop_blocking())
+            {
+                case uiFilterUpdate:
+                    uint32_t save = spin_lock_blocking(lock);
+                    for (int i=0; i < ntaps; i++)
+                        coeffs[ntaps-i-1] = (q15_t)(h[i]*32768.0);
+                    spin_unlock(lock, save);
+                    arm_fir_init_q15(&FIRFilterObj, ntaps, coeffs, state, FRAME_LENGTH);
+                    break;
+                // Invalid command - ignore
+                default:
+                    break;
+            }
+        }
+
         // Detect an edge on the ADC semaphore to detect an aDC DMA interrupt.
         critical_section_enter_blocking(&myCS);
         if (adc_semaphore != my_adc_semaphore)
@@ -302,22 +312,36 @@ void main()
         {
             adc_isr_flag = false;
             
-            /*
-             * Write the I2S output data. Bits 31:16 are the Right channel.
-             * Bits 15:0 are the left channel.
-             */
             capture_base = (1-my_adc_semaphore)*FRAME_LENGTH;
             output_base = (1-my_adc_semaphore)*FRAME_LENGTH;
 
+            /*
+             * Shift the 12-bit input signal to 16 bits (1.15 format).
+             */
+            for(int i=0; i < FRAME_LENGTH; i++)
+                tmpIn[i] = capture_buff[capture_base+i] << 3; // 12 to 16 bits   
+                
+            /*
+             * Do the Channel filtering
+             */
+            arm_fir_q15(&FIRFilterObj, &tmpIn[0], &tmpOut[0], FRAME_LENGTH);            
+
+            /*
+             * Output the signal to the I2S buffer
+             */
+            for(int i=0; i < FRAME_LENGTH; i++)
+                output_buff[output_base+i] = (int32_t)((tmpOut[i] << 16) | tmpOut[i]);
+        
+        /*
+            // Straight-through connection
             for(int n=0; n < FRAME_LENGTH; n++)
             {
                 int16_t x = capture_buff[capture_base+n] << 3; // 12 to 16 bits
                 output_buff[output_base+n] = (int32_t)((x << 16) | x);
-                
+            
             }
-            //printf("ADC interrupt. capture_base=%u, output_base=%u\n", capture_base, output_base);
+        */
         }
- 
     }
 
     /*
@@ -325,13 +349,12 @@ void main()
      */
     adc_run(false);
     adc_fifo_drain();
+    multicore_fifo_drain();
     dma_channel_cleanup(adc_dma0_chan);
     dma_channel_cleanup(adc_dma1_chan);
     dma_channel_cleanup(i2s_dma0_chan);
     dma_channel_cleanup(i2s_dma1_chan);
-
 }
-
 
 
 /*

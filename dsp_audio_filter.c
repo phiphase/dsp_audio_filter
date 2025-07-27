@@ -69,6 +69,7 @@ spin_lock_t *lock;
 float_t h[MAX_TAPS];
 uint16_t ntaps;
 
+uint32_t time1, time2;
 
 /*
  * The DMA interrupt handlers and the critical section object
@@ -108,6 +109,11 @@ void core1_main()
     while(1)
     {
         sleep_ms(100);
+        uint32_t save = spin_lock_blocking(lock);
+        int duration = time2-time1;
+        if (duration > 0)
+            printf("duration = %d us\n", (int)duration);
+        spin_unlock(lock, save);
     }
 
     printf("Core 1 exiting\n");
@@ -269,7 +275,7 @@ void main()
     /* The main processing loop                                                                  */
     /*-------------------------------------------------------------------------------------------*/
     while(1)
-    {      
+    {    
         /*
          * Check for commands from core-1.
          */
@@ -310,6 +316,7 @@ void main()
         */
         if (adc_isr_flag)
         {
+            time1 = time_us_32();
             adc_isr_flag = false;
             
             capture_base = (1-my_adc_semaphore)*FRAME_LENGTH;
@@ -341,7 +348,12 @@ void main()
             
             }
         */
+            time2 = time_us_32();
         }
+
+
+
+
     }
 
     /*

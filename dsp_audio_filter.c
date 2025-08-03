@@ -20,18 +20,19 @@
 #include "hardware/dma.h"
 #include "hardware/pio.h"
 #include "hardware/sync.h"
+#include "hardware/i2c.h"
 #include "pico/stdlib.h"
 #include "pico/critical_section.h"
 #include "pico/multicore.h"
 #include "i2s.pio.h"
 #include "arm_math.h"
 #include "filter.h"
-
+#include "ads1015.h"
 
 #define FRAME_LENGTH 128
 #define ADC_RING_BITS 8
 #define I2S_RING_BITS 9
-#define ADC_GPIO 26 // Pin 31
+#define ADC0_GPIO 26 // Pin 31
 #define I2S_DATA_GPIO 18  // Pin 24, 25, 26
 #define FS 8000  // Sample rate
 #define CAPTURE_CHANNEL 0
@@ -39,6 +40,10 @@
 #define I2S_BIT_RATE 64*FS  // 32 bits
 #define MAX_TAPS 500  // Maximum number of taps of a filter
 #define SPIN_LOCK_ID 1
+#define NAVG 4  // No. averages. must be even and a multiple of 4.
+#define NLMS 64  // Number of taps for the LMS filter
+#define NOISE_RED 0   // NC operates in noise reduction mode
+#define AUTO_NOTCH 1  // NC operates in auto-notch mode
 
 /*
  * The ADC data buffer, capture_buf (16 bit) and
@@ -62,9 +67,16 @@ uint adc_semaphore;
 /*
  * Global structures that enable the core-0 (DSP) to communicate with core-1 (UI)
  */
-const uint32_t uiFilterUpdate = 1;
-const uint32_t uiNCOn         = 2;
-const uint32_t uiNCOff        = 3;
+const uint32_t uiAvgFilterIn    = 1;
+const uint32_t uiAvgFilterOut   = 2;
+const uint32_t uiChFilterIn     = 3;
+const uint32_t uiChFilterOut    = 4;
+const uint32_t uiChFilterUpdate = 5;
+const uint32_t uiNCIn           = 6;
+const uint32_t uiNCOut          = 7;
+const uint32_t uiNCAutoNotch    = 8;
+const uint32_t uiNCNoiseRed     = 9;
+
 spin_lock_t *lock;
 float_t h[MAX_TAPS];
 uint16_t ntaps;
@@ -92,21 +104,42 @@ void core1_main()
     float_t AdB = 50;            // dB stop-band attenuation
     
     printf("Core 1 up\n");
+    
+    // Initialise the I2C interface and ADS1015 ADC
+    ads1015_init();
+
+    while(1)
+    {
+
+        // Do ADC reads.
+        int16_t adc0 = read_adc(0);
+        int16_t adc1 = read_adc(1);
+        int16_t adc2 = read_adc(2);
+        int16_t adc3 = read_adc(3);
+        printf("ADC0=%d, ADC1=%d, ADC2=%d, ADC3=%d\n", adc0, adc1, adc2, adc3);
+        sleep_ms(100);
         
-    // h and ntaps are global
-    uint32_t save = spin_lock_blocking(lock);
-    ntaps = kaiserFindN(AdB, b/fs);
-    wsfirKBP(h, ntaps, fc1/fs, fc2/fs, AdB);
-    spin_unlock(lock, save);
-    multicore_fifo_push_blocking(uiFilterUpdate);
+        // h and ntaps are global
+        uint32_t save = spin_lock_blocking(lock);
+        ntaps = kaiserFindN(AdB, b/fs);
+        wsfirKBP(h, ntaps, fc1/fs, fc2/fs, AdB);
+        spin_unlock(lock, save);
+        multicore_fifo_push_blocking(uiChFilterUpdate);
+        multicore_fifo_push_blocking(uiAvgFilterOut);
+        multicore_fifo_push_blocking(uiChFilterIn);
+        multicore_fifo_push_blocking(uiNCOut);
+        multicore_fifo_push_blocking(uiNCAutoNotch);
 
 /*
     // For MATLAB
     printf("ntaps=%u\n", ntaps);
     for(uint i=0; i < ntaps; i++)
         printf("%f\n",h[i]);
-*/
-    while(1)
+*/      sleep_ms(100);
+
+    }
+    
+    /*while(1)
     {
         sleep_ms(100);
         uint32_t save = spin_lock_blocking(lock);
@@ -114,7 +147,7 @@ void core1_main()
         if (duration > 0)
             printf("duration = %d us\n", (int)duration);
         spin_unlock(lock, save);
-    }
+    }*/
 
     printf("Core 1 exiting\n");
     sleep_ms(1000);
@@ -134,28 +167,75 @@ void main()
     uint my_adc_semaphore = 0;
     uint capture_base = 0;
     uint output_base = 0;
+    
+    // Averaging filter
+    q15_t avgCoeffs[NAVG];
+    q15_t avgState[NAVG+FRAME_LENGTH-1];
+    arm_fir_instance_q15 AvgFilterObj;
+
+    // Channel filter
     arm_fir_instance_q15 FIRFilterObj;
-    q15_t coeffs[MAX_NTAPS];
-    q15_t state[MAX_NTAPS];
-    q15_t tmpIn[FRAME_LENGTH];
-    q15_t tmpOut[FRAME_LENGTH];
+    q15_t FIRcoeffs[MAX_NTAPS];
+    q15_t FIRstate[MAX_NTAPS];
+
+    // LMS Filter
+    arm_lms_norm_instance_q15 LMSFilterObj;
+    q15_t lmsCoeffs[NLMS];
+    q15_t lmsState[NLMS + FRAME_LENGTH-1];
+    q15_t mu = (q15_t)(32768.0 * 0.001);
+
+    q15_t dlyCoeffs[4];
+    q15_t dlyState[4+FRAME_LENGTH-1];
+    arm_fir_instance_q15 DlyFilterObj;
+
+
+    // Signal path
+    q15_t tmp1[FRAME_LENGTH];
+    q15_t tmp2[FRAME_LENGTH];
+    q15_t tmp3[FRAME_LENGTH];
+    q15_t avgFilterOut[FRAME_LENGTH];
+    q15_t chFilterOut[FRAME_LENGTH];
+    q15_t ncOut[FRAME_LENGTH];
+    q15_t *pOut;  // Equal either to tmp1 or tmp2. Used to find the output data
+
+    // Flags to control the signal path. Default is
+    // straight through, i.e. no filtering
+    bool chFilterIn = false;
+    bool avgFilterIn = false;
+    bool ncIn = false;
+    int ncMode = NOISE_RED;  // Either NOISE_RED (false) or AUTO_NOTCH (true)
 
     stdio_init_all();
     setup_default_uart();
     lock = spin_lock_init(SPIN_LOCK_ID);
     critical_section_init(&myCS);
    
+    // initialise the averaging filter
+    for(int i=0; i < NAVG; i++)
+        avgCoeffs[i] = (q15_t)(32768.0/(double)NAVG);
+    arm_fir_init_q15(&AvgFilterObj, NAVG, avgCoeffs, avgState, FRAME_LENGTH);
+
+    // Initialise the LMS filter
+    for(int i=0; i < NLMS; i++)
+        lmsCoeffs[i] = (q15_t)(32768.0*0.5);
+    arm_lms_norm_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);		
+    /*for(int i=0; i < 4; i++)
+        dlyCoeffs[i]=0;
+    dlyCoeffs[3] = (q15_t)32767;
+    arm_fir_init_q15(&DlyFilterObj, 4, dlyCoeffs, dlyState, FRAME_LENGTH);
+*/
     /*
      * Start the other core that deals with the UI
      */
     multicore_launch_core1(core1_main);
 
     /*
-     * Set up the ADC
+     * Set up the audio ADC
      */
-    adc_gpio_init(ADC_GPIO + CAPTURE_CHANNEL);
+    
+    adc_gpio_init(ADC0_GPIO);
     adc_init();
-    adc_select_input(CAPTURE_CHANNEL);
+    adc_select_input(CAPTURE_CHANNEL);   
     adc_fifo_setup(
         true,    // Write each completed conversion to the sample FIFO
         true,    // Enable DMA data request (DREQ)
@@ -283,12 +363,36 @@ void main()
         {   
             switch(multicore_fifo_pop_blocking())
             {
-                case uiFilterUpdate:
+                case uiAvgFilterIn:
+                    avgFilterIn = true;
+                    break;
+                case uiAvgFilterOut:
+                    avgFilterIn = false;
+                    break;
+                case uiChFilterIn:
+                    chFilterIn = true;
+                    break;
+                case uiChFilterOut:
+                    chFilterIn = false;
+                    break;
+                case uiNCIn:
+                    ncIn = true;
+                    break;
+                case uiNCOut:
+                    ncIn = false;
+                    break;
+                case uiNCAutoNotch:
+                    ncMode = AUTO_NOTCH;
+                    break;
+                case uiNCNoiseRed:
+                    ncMode = NOISE_RED;
+                    break;
+                case uiChFilterUpdate:
                     uint32_t save = spin_lock_blocking(lock);
                     for (int i=0; i < ntaps; i++)
-                        coeffs[ntaps-i-1] = (q15_t)(h[i]*32768.0);
+                        FIRcoeffs[ntaps-i-1] = (q15_t)(h[i]*32768.0);
                     spin_unlock(lock, save);
-                    arm_fir_init_q15(&FIRFilterObj, ntaps, coeffs, state, FRAME_LENGTH);
+                    arm_fir_init_q15(&FIRFilterObj, ntaps, FIRcoeffs, FIRstate, FRAME_LENGTH);
                     break;
                 // Invalid command - ignore
                 default:
@@ -326,18 +430,42 @@ void main()
              * Shift the 12-bit input signal to 16 bits (1.15 format).
              */
             for(int i=0; i < FRAME_LENGTH; i++)
-                tmpIn[i] = capture_buff[capture_base+i] << 3; // 12 to 16 bits   
-                
-            /*
-             * Do the Channel filtering
-             */
-            arm_fir_q15(&FIRFilterObj, &tmpIn[0], &tmpOut[0], FRAME_LENGTH);            
+                tmp1[i] = capture_buff[capture_base+i] << 3; // 12 to 16 bits   
+            
+                // Averaging Filter
+                if (avgFilterIn)                
+                {
+                    arm_fir_q15(&AvgFilterObj, tmp1, avgFilterOut, FRAME_LENGTH);
+                    pOut = avgFilterOut;
+                }
+                else
+                    pOut = tmp1;
 
+                // Channel Filter
+                if (chFilterIn)
+                {                    
+                    arm_fir_q15(&FIRFilterObj, pOut, chFilterOut, FRAME_LENGTH);
+                    pOut = chFilterOut;
+                }
+
+                // Noise Cancellation
+                if (ncIn)
+                {
+                    //arm_fir_q15(&DlyFilterObj, pOut, dly, FRAME_LENGTH);
+                    //arm_lms_norm_q15(&LMSFilterObj, pIn, nCOut, tmp2, tmp3, FRAME_LENGTH);
+                    //if (ncMode == NOISE_RED)                
+                    //    pOut = tmp2;
+                    //else
+                    //    pOut = tmp3;                        
+                    //}	 	        
+                }
+                    
+            
             /*
              * Output the signal to the I2S buffer
              */
             for(int i=0; i < FRAME_LENGTH; i++)
-                output_buff[output_base+i] = (int32_t)((tmpOut[i] << 16) | tmpOut[i]);
+                output_buff[output_base+i] = (int32_t)((pOut[i] << 16) | pOut[i]);
         
         /*
             // Straight-through connection

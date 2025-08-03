@@ -35,15 +35,25 @@
 #define ADC0_GPIO 26 // Pin 31
 #define I2S_DATA_GPIO 18  // Pin 24, 25, 26
 #define FS 8000  // Sample rate
+#define F_MAX 3500.0  // Maximum filter frequency
+#define F_MIN 200.0   // Minimum filter frequency
 #define CAPTURE_CHANNEL 0
 #define ADC_CLKDIV (48000000/FS)-1 //5999
 #define I2S_BIT_RATE 64*FS  // 32 bits
 #define MAX_TAPS 500  // Maximum number of taps of a filter
 #define SPIN_LOCK_ID 1
 #define NAVG 4  // No. averages. must be even and a multiple of 4.
-#define NLMS 64  // Number of taps for the LMS filter
-#define NOISE_RED 0   // NC operates in noise reduction mode
-#define AUTO_NOTCH 1  // NC operates in auto-notch mode
+#define NLMS 64  // Number of taps for the LMS filter. Must be a multiple of 4.
+#define NOISE_RED 0      // NC operates in noise reduction mode
+#define AUTO_NOTCH 1     // NC operates in auto-notch mode
+#define NUM_ADC_CH 4     // Number of ADC channels
+#define ADC_MAX 1635     // Maximum ADC output
+#define ADC_MIN 2        // Minimum ADC output
+#define ADC_HPF 0        // High pass filter ADC channel
+#define ADC_LPF 1        // Low pass filter ADC channel
+#define ADC_NC  2        // Noise canceller level ADC channel
+#define ADC_CW  3        // CW keyer speed ADC channel
+#define ADC_HYSTERISIS 5 // The amount that the ADC value has to change by
 
 /*
  * The ADC data buffer, capture_buf (16 bit) and
@@ -97,9 +107,11 @@ critical_section_t myCS;
 //-----------------------------------------------------------------------------------------------
 void core1_main()
 {
+    int16_t adc[NUM_ADC_CH], lastAdc[NUM_ADC_CH];
+    bool adcChange[NUM_ADC_CH];  // Flags for ADC value change
     const float_t fs = FS;       // Hz Sample rate
-    float_t fc1 = 600;           // Hz lower corner frequency
-    float_t fc2 = 900;           // Hz upper corner frequency
+    float_t fc_hpf = 600;        // Hz lower corner frequency
+    float_t fc_lpf = 900;        // Hz upper corner frequency
     float_t b = 80;              // Hz transition bandwidth
     float_t AdB = 50;            // dB stop-band attenuation
     
@@ -107,24 +119,45 @@ void core1_main()
     
     // Initialise the I2C interface and ADS1015 ADC
     ads1015_init();
+    
+    // Zero the last ADC values
+    memset((void *)lastAdc, 0, sizeof(int16_t)*NUM_ADC_CH);
 
     while(1)
     {
-
         // Do ADC reads.
-        int16_t adc0 = read_adc(0);
-        int16_t adc1 = read_adc(1);
-        int16_t adc2 = read_adc(2);
-        int16_t adc3 = read_adc(3);
-        printf("ADC0=%d, ADC1=%d, ADC2=%d, ADC3=%d\n", adc0, adc1, adc2, adc3);
-        sleep_ms(100);
+        adc[0] = read_adc(0);  // HPF frequency, fc1
+        adc[1] = read_adc(1);  // LPF frequency, fc2
+        adc[2] = read_adc(2);  // NC level
+        adc[3] = read_adc(3);  // CW speed   
+        //printf("ADC0=%d, ADC1=%d, ADC2=%d, ADC3=%d\n", adc[0], adc[1], adc[2], adc[3]);
+        for(int n=0; n < NUM_ADC_CH; n++)
+        {
+            adcChange[n] = false;
+            if(abs(adc[n] - lastAdc[n]) > 5)
+                adcChange[n] = true;
+            lastAdc[n] = adc[n];
+        }     
         
-        // h and ntaps are global
-        uint32_t save = spin_lock_blocking(lock);
-        ntaps = kaiserFindN(AdB, b/fs);
-        wsfirKBP(h, ntaps, fc1/fs, fc2/fs, AdB);
-        spin_unlock(lock, save);
-        multicore_fifo_push_blocking(uiChFilterUpdate);
+        if(adcChange[ADC_HPF] || adcChange[ADC_LPF])
+        {
+            float_t local_h[MAX_TAPS];
+            uint16_t local_ntaps;
+            fc_hpf = F_MIN + ((float)(adc[0]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(F_MAX-F_MIN);
+            fc_lpf = F_MIN + ((float)(adc[1]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(F_MAX-F_MIN);
+            
+            local_ntaps = kaiserFindN(AdB, b/fs);   
+            wsfirKBP(local_h, local_ntaps, fc_hpf/fs, fc_lpf/fs, AdB); 
+
+            // h and ntaps are accessed by core0 so need a lock
+            uint32_t save = spin_lock_blocking(lock);
+            ntaps = local_ntaps;
+            memcpy((void *)h, (void *)local_h, ntaps*sizeof(float_t));
+            spin_unlock(lock, save);
+
+            multicore_fifo_push_blocking(uiChFilterUpdate);
+        }
+
         multicore_fifo_push_blocking(uiAvgFilterOut);
         multicore_fifo_push_blocking(uiChFilterIn);
         multicore_fifo_push_blocking(uiNCOut);
@@ -364,7 +397,7 @@ void main()
             switch(multicore_fifo_pop_blocking())
             {
                 case uiAvgFilterIn:
-                    avgFilterIn = true;
+                    avgFilterIn = false;
                     break;
                 case uiAvgFilterOut:
                     avgFilterIn = false;
@@ -388,10 +421,10 @@ void main()
                     ncMode = NOISE_RED;
                     break;
                 case uiChFilterUpdate:
-                    uint32_t save = spin_lock_blocking(lock);
+                    //uint32_t save = spin_lock_blocking(lock);
                     for (int i=0; i < ntaps; i++)
                         FIRcoeffs[ntaps-i-1] = (q15_t)(h[i]*32768.0);
-                    spin_unlock(lock, save);
+                    //spin_unlock(lock, save);
                     arm_fir_init_q15(&FIRFilterObj, ntaps, FIRcoeffs, FIRstate, FRAME_LENGTH);
                     break;
                 // Invalid command - ignore

@@ -39,7 +39,7 @@ int16_t read_adc(uint8_t ch)
     /* ADS1015 CONFIGURATION
     +----------------------------------------------------- OS bit 15 = 1. Start single conversion
     |     +----------------------------------------------- MUX[2:0] = rrr set by ADC channel. ADC0: 100: ADC1: 101, ADC2: 110, ADC3: 111
-    |     |        +-------------------------------------- PGA[2:0] = 000. PGA = +/- 6.144 V FSR
+    |     |        +-------------------------------------- PGA[2:0] = 001. PGA = +/- 4.096 V FSR
     |     |        |      +------------------------------- MODE = 1. Single-shot mode
     |     |        |      |     +------------------------- DR[2:0] = 100. 1600sps data rate
     |     |        |      |     |     +------------------- COMP_MODE = 0. Traditional comparator mode
@@ -48,11 +48,11 @@ int16_t read_adc(uint8_t ch)
     |     |        |      |     |     |    |   |    +----- COMP_QUE[1:0] = 11. Disable comparator and alrt/rdy flag
     |     |        |      |     |     |    |   |    |
     -   -----    -----    -   -----   -    -   -   --- 
-    1   r r r  \ 0 0 0    1 \ 1 0 0   0  \ 0   0   1 1
+    1   r r r  \ 0 0 1    1 \ 1 0 0   0  \ 0   0   1 1
   
-    0x 8 | rrr\1\8\3
+    0x 8 | rrr\3\8\3
     */
-    uint16_t config = 0x8183;
+    uint16_t config = 0x8383;
 
     switch(ch)
     {

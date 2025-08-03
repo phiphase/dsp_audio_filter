@@ -29,15 +29,16 @@
 #include "filter.h"
 #include "ads1015.h"
 
+#define ADC0_GPIO 26 // Pin 31
+#define FC_AND_B_SEL_GPIO 2   // Take GPIO2 (pin 4) low to enable centre frequency/bandwidth control
+#define I2S_DATA_GPIO 18  // Pin 24, 25, 26
+
+
 #define FRAME_LENGTH 128
 #define ADC_RING_BITS 8
 #define I2S_RING_BITS 9
-#define ADC0_GPIO 26 // Pin 31
-#define I2S_DATA_GPIO 18  // Pin 24, 25, 26
-#define FS 8000  // Sample rate
-#define F_MAX 3500.0  // Maximum filter frequency
-#define F_MIN 200.0   // Minimum filter frequency
 #define CAPTURE_CHANNEL 0
+#define FS 8000  // Sample rate
 #define ADC_CLKDIV (48000000/FS)-1 //5999
 #define I2S_BIT_RATE 64*FS  // 32 bits
 #define MAX_TAPS 500  // Maximum number of taps of a filter
@@ -47,12 +48,12 @@
 #define NOISE_RED 0      // NC operates in noise reduction mode
 #define AUTO_NOTCH 1     // NC operates in auto-notch mode
 #define NUM_ADC_CH 4     // Number of ADC channels
+#define F_MAX 3600.0  // Maximum centre frequency
+#define F_MIN 300.0   // Minimum centre frequency
+#define B_MAX 3000.0 // Maximum bandwidth
+#define B_MIN 100.0   // Minimum bandwidth
 #define ADC_MAX 1635     // Maximum ADC output
 #define ADC_MIN 2        // Minimum ADC output
-#define ADC_HPF 0        // High pass filter ADC channel
-#define ADC_LPF 1        // Low pass filter ADC channel
-#define ADC_NC  2        // Noise canceller level ADC channel
-#define ADC_CW  3        // CW keyer speed ADC channel
 #define ADC_HYSTERISIS 5 // The amount that the ADC value has to change by
 
 /*
@@ -110,13 +111,18 @@ void core1_main()
     int16_t adc[NUM_ADC_CH], lastAdc[NUM_ADC_CH];
     bool adcChange[NUM_ADC_CH];  // Flags for ADC value change
     const float_t fs = FS;       // Hz Sample rate
-    float_t fc_hpf = 600;        // Hz lower corner frequency
-    float_t fc_lpf = 900;        // Hz upper corner frequency
-    float_t b = 80;              // Hz transition bandwidth
+    float_t fL = 600;            // Hz lower corner frequency
+    float_t fH = 900;            // Hz upper corner frequency
+    float_t Bt = 80;             // Hz transition bandwidth
     float_t AdB = 50;            // dB stop-band attenuation
     
     printf("Core 1 up\n");
     
+    // Set up GPIOs
+    gpio_init(FC_AND_B_SEL_GPIO);
+    gpio_set_dir(FC_AND_B_SEL_GPIO, GPIO_IN);
+	gpio_pull_up(FC_AND_B_SEL_GPIO);
+
     // Initialise the I2C interface and ADS1015 ADC
     ads1015_init();
     
@@ -125,29 +131,40 @@ void core1_main()
 
     while(1)
     {
-        // Do ADC reads.
-        adc[0] = read_adc(0);  // HPF frequency, fc1
-        adc[1] = read_adc(1);  // LPF frequency, fc2
-        adc[2] = read_adc(2);  // NC level
-        adc[3] = read_adc(3);  // CW speed   
-        //printf("ADC0=%d, ADC1=%d, ADC2=%d, ADC3=%d\n", adc[0], adc[1], adc[2], adc[3]);
+        // ADC reads and see if the ADC value has changed from last time.
         for(int n=0; n < NUM_ADC_CH; n++)
         {
+            adc[n] = read_adc(n);  // Centre frequency
             adcChange[n] = false;
-            if(abs(adc[n] - lastAdc[n]) > 5)
+            if(abs(adc[n] - lastAdc[n]) > ADC_HYSTERISIS)
                 adcChange[n] = true;
             lastAdc[n] = adc[n];
         }     
         
-        if(adcChange[ADC_HPF] || adcChange[ADC_LPF])
+        if(adcChange[0] || adcChange[1])
         {
-            float_t local_h[MAX_TAPS];
-            uint16_t local_ntaps;
-            fc_hpf = F_MIN + ((float)(adc[0]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(F_MAX-F_MIN);
-            fc_lpf = F_MIN + ((float)(adc[1]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(F_MAX-F_MIN);
+            if (gpio_get(FC_AND_B_SEL_GPIO)==0)
+            {
+                float fc = F_MIN + ((float)(adc[0]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (F_MAX- F_MIN);
+                float bw = B_MIN + ((float)(adc[1]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(B_MAX-B_MIN);
+                fL = fc - bw/2;
+                fH = fc + bw/2;
+            }
+            else
+            {
+
+                fL = F_MIN + ((float)(adc[0]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(F_MAX-F_MIN);
+                fH = F_MIN + ((float)(adc[1]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(F_MAX-F_MIN);
+            }
+            // Put limits on fL and fH.
+            fL = fL < F_MIN ? F_MIN:fL;
+            fL = fL > F_MAX ? F_MAX:fL;
+            fH = fH < F_MIN ? F_MIN:fH;
+            fH = fH > F_MAX ? F_MAX:fH;
             
-            local_ntaps = kaiserFindN(AdB, b/fs);   
-            wsfirKBP(local_h, local_ntaps, fc_hpf/fs, fc_lpf/fs, AdB); 
+            float_t local_h[MAX_TAPS];
+            uint16_t local_ntaps = kaiserFindN(AdB, Bt/fs);   
+            wsfirKBP(local_h, local_ntaps, fL/fs, fH/fs, AdB); 
 
             // h and ntaps are accessed by core0 so need a lock
             uint32_t save = spin_lock_blocking(lock);

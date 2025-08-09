@@ -11,6 +11,13 @@
  * Note: float32_t is an arm_math type. The standart C/C++ definition is float
  * doubles are used for non-time-critical variables that are non-integer.
  * 
+ * Functions
+ * ---------
+ * GPIO2 (pin 4) 0: fc/B, 1: fL/fH
+ * GPIO3 (pin 5) 0: average filter in, 1: average filter out
+ * GPIO4 (pin 6) 0: channel filter in, 1: channel filter out
+ * GPIO5 (pin 7) 0: ALE in, 1: ALE out
+ * GPIO6 (pin 9) ALE mode: 0: Auto notch, 1: noise reduction
 *********************************************************************************/
 #include <stdio.h>
 #include <string.h>
@@ -31,6 +38,10 @@
 
 #define ADC0_GPIO 26 // Pin 31
 #define FC_AND_B_SEL_GPIO 2   // Take GPIO2 (pin 4) low to enable centre frequency/bandwidth control
+#define AVG_FILTER_GPIO 3
+#define CH_FILTER_GPIO 4
+#define ALE_GPIO 5
+#define ALE_MODE_GPIO  6
 #define I2S_DATA_GPIO 18  // Pin 24, 25, 26
 
 
@@ -41,20 +52,26 @@
 #define FS 8000  // Sample rate
 #define ADC_CLKDIV (48000000/FS)-1 //5999
 #define I2S_BIT_RATE 64*FS  // 32 bits
-#define MAX_TAPS 500  // Maximum number of taps of a filter
+#define MAX_TAPS 500     // Maximum number of taps of a filter
+#define COEFF_SCALE 32768.0
 #define SPIN_LOCK_ID 1
-#define NAVG 4  // No. averages. must be even and a multiple of 4.
-#define NLMS 64  // Number of taps for the LMS filter. Must be a multiple of 4.
-#define NOISE_RED 0      // NC operates in noise reduction mode
-#define AUTO_NOTCH 1     // NC operates in auto-notch mode
+#define NAVG 4           // No. averages. must be even and a multiple of 4.
 #define NUM_ADC_CH 4     // Number of ADC channels
-#define F_MAX 3600.0  // Maximum centre frequency
-#define F_MIN 300.0   // Minimum centre frequency
-#define B_MAX 3000.0 // Maximum bandwidth
-#define B_MIN 100.0   // Minimum bandwidth
+#define F_MAX 3600.0     // Maximum centre frequency
+#define F_MIN 300.0      // Minimum centre frequency
+#define B_MAX 3000.0     // Maximum bandwidth
+#define B_MIN 100.0      // Minimum bandwidth
 #define ADC_MAX 1635     // Maximum ADC output
 #define ADC_MIN 2        // Minimum ADC output
-#define ADC_HYSTERISIS 5 // The amount that the ADC value has to change by
+#define ADC_HYSTERISIS 5 // The amount that the filter corner frequency ADCs have to change by
+#define MU 0.01         // LMS algorithm mu
+#define NLMS 32         // Number of taps for the LMS filter. Must be a multiple of 4.
+#define DELAY 4          // ALE Delay line length
+#define MAX_DELAY 32     // Maximum ALE Delay line length
+#define NOISE_RED 0      // ALE operates in noise reduction mode
+#define AUTO_NOTCH 1     // ALE operates in auto-notch mode
+#define NORM_LMS 1
+#define F32_LMS 0
 
 /*
  * The ADC data buffer, capture_buf (16 bit) and
@@ -83,13 +100,15 @@ const uint32_t uiAvgFilterOut   = 2;
 const uint32_t uiChFilterIn     = 3;
 const uint32_t uiChFilterOut    = 4;
 const uint32_t uiChFilterUpdate = 5;
-const uint32_t uiNCIn           = 6;
-const uint32_t uiNCOut          = 7;
-const uint32_t uiNCAutoNotch    = 8;
-const uint32_t uiNCNoiseRed     = 9;
+const uint32_t uiALEIn           = 6;
+const uint32_t uiALEOut          = 7;
+const uint32_t uiALEAutoNotch    = 8;
+const uint32_t uiALENoiseRed     = 9;
+const uint32_t uiFFTIn          = 10;
+const uint32_t uiFFTOut         = 11;
 
 spin_lock_t *lock;
-float_t h[MAX_TAPS];
+float32_t h[MAX_TAPS];
 uint16_t ntaps;
 
 uint32_t time1, time2;
@@ -101,6 +120,54 @@ void dma_isr_0();
 void dma_isr_1();
 critical_section_t myCS;
 
+/*
+ * All in global space so the spin-lock protects
+ * AvgFilterObj, avgCoeffs, avgState
+ */
+arm_fir_instance_q15 AvgFilterObj;
+q15_t avgCoeffs[NAVG];
+q15_t avgState[NAVG+FRAME_LENGTH];
+
+
+/* Channel filter
+ * All in global space so the spin-lock protects
+ * FIRFilterObj, FIRcoeffs, FIRstate
+ */
+arm_fir_instance_q15 FIRFilterObj;
+q15_t FIRcoeffs[MAX_NTAPS];
+q15_t FIRstate[MAX_NTAPS+FRAME_LENGTH];
+
+/*
+ * Adaptive Line Enhancer (ALE) in global space
+ * so that the spinlock protects DelayObj, LMSFilterObj,
+ * delayCoeffs, delayState, lmsCoeffs, lmsState
+ */
+#if F32_LMS
+float32_t delayCoeffs[MAX_DELAY];
+float32_t delayState[MAX_DELAY+FRAME_LENGTH];
+float32_t lmsCoeffs[NLMS];
+float32_t lmsState[NLMS+FRAME_LENGTH];
+float32_t mu = MU;
+arm_fir_instance_f32 DelayObj;
+arm_lms_instance_f32 LMSFilterObj;
+#else
+q15_t delayCoeffs[MAX_DELAY];
+q15_t delayState[MAX_DELAY+FRAME_LENGTH];
+q15_t lmsCoeffs[NLMS];
+q15_t lmsState[NLMS+FRAME_LENGTH];
+q15_t mu = (q15_t)(32768.0 * MU);
+#endif
+
+#if NORM_LMS
+arm_fir_instance_q15 DelayObj;
+arm_lms_norm_instance_q15 LMSFilterObj;
+#else
+arm_fir_instance_q15 DelayObj;
+arm_lms_instance_q15 LMSFilterObj;
+#endif
+
+arm_rfft_fast_instance_f32 FFTObj;
+
 //-----------------------------------------------------------------------------------------------
 // Core 1 main entry point                                                                       
 // Core 1 handles the user interface and creates the filter coefficients.  It passes commands
@@ -110,18 +177,36 @@ void core1_main()
 {
     int16_t adc[NUM_ADC_CH], lastAdc[NUM_ADC_CH];
     bool adcChange[NUM_ADC_CH];  // Flags for ADC value change
-    const float_t fs = FS;       // Hz Sample rate
-    float_t fL = 600;            // Hz lower corner frequency
-    float_t fH = 900;            // Hz upper corner frequency
-    float_t Bt = 80;             // Hz transition bandwidth
-    float_t AdB = 50;            // dB stop-band attenuation
+    bool avgFilterIn = false;
+    bool chFilterIn = false;
+    bool aleIn = false;
+    bool aleAutoNotch = false;
+    bool aleNoiseRed = false;
+    const float32_t fs = FS;       // Hz Sample rate
+    float32_t fL = 600;            // Hz lower corner frequency
+    float32_t fH = 900;            // Hz upper corner frequency
+    float32_t Bt = 80;             // Hz transition bandwidth
+    float32_t AdB = 50;            // dB stop-band attenuation
     
     printf("Core 1 up\n");
     
     // Set up GPIOs
     gpio_init(FC_AND_B_SEL_GPIO);
+    gpio_init(AVG_FILTER_GPIO);
+    gpio_init(CH_FILTER_GPIO);
+    gpio_init(ALE_GPIO);
+    gpio_init(ALE_MODE_GPIO);
     gpio_set_dir(FC_AND_B_SEL_GPIO, GPIO_IN);
-	gpio_pull_up(FC_AND_B_SEL_GPIO);
+    gpio_set_dir(AVG_FILTER_GPIO, GPIO_IN);
+    gpio_set_dir(CH_FILTER_GPIO, GPIO_IN);
+    gpio_set_dir(ALE_GPIO, GPIO_IN);
+    gpio_set_dir(ALE_MODE_GPIO, GPIO_IN);
+    gpio_pull_up(FC_AND_B_SEL_GPIO);
+    gpio_pull_up(AVG_FILTER_GPIO);
+    gpio_pull_up(CH_FILTER_GPIO);
+    gpio_pull_up(ALE_GPIO);
+    gpio_pull_up(ALE_MODE_GPIO);
+
 
     // Initialise the I2C interface and ADS1015 ADC
     ads1015_init();
@@ -129,18 +214,12 @@ void core1_main()
     // Zero the last ADC values
     memset((void *)lastAdc, 0, sizeof(int16_t)*NUM_ADC_CH);
 
+    // Force the filter taps to be computed.
+    adcChange[0] = true;
+    
     while(1)
     {
-        // ADC reads and see if the ADC value has changed from last time.
-        for(int n=0; n < NUM_ADC_CH; n++)
-        {
-            adc[n] = read_adc(n);  // Centre frequency
-            adcChange[n] = false;
-            if(abs(adc[n] - lastAdc[n]) > ADC_HYSTERISIS)
-                adcChange[n] = true;
-            lastAdc[n] = adc[n];
-        }     
-        
+       
         if(adcChange[0] || adcChange[1])
         {
             if (gpio_get(FC_AND_B_SEL_GPIO)==0)
@@ -152,7 +231,6 @@ void core1_main()
             }
             else
             {
-
                 fL = F_MIN + ((float)(adc[0]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(F_MAX-F_MIN);
                 fH = F_MIN + ((float)(adc[1]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(F_MAX-F_MIN);
             }
@@ -162,30 +240,75 @@ void core1_main()
             fH = fH < F_MIN ? F_MIN:fH;
             fH = fH > F_MAX ? F_MAX:fH;
             
-            float_t local_h[MAX_TAPS];
+            float32_t local_h[MAX_TAPS];
             uint16_t local_ntaps = kaiserFindN(AdB, Bt/fs);   
             wsfirKBP(local_h, local_ntaps, fL/fs, fH/fs, AdB); 
 
             // h and ntaps are accessed by core0 so need a lock
             uint32_t save = spin_lock_blocking(lock);
             ntaps = local_ntaps;
-            memcpy((void *)h, (void *)local_h, ntaps*sizeof(float_t));
+            memcpy((void *)h, (void *)local_h, local_ntaps*sizeof(float32_t));
             spin_unlock(lock, save);
-
             multicore_fifo_push_blocking(uiChFilterUpdate);
+        }        
+
+        if (!gpio_get(AVG_FILTER_GPIO) && !avgFilterIn)
+        {
+            avgFilterIn = true;
+            multicore_fifo_push_blocking(uiAvgFilterIn);
         }
+        if(gpio_get(AVG_FILTER_GPIO) && avgFilterIn)
+        {
+            avgFilterIn = false;
+            multicore_fifo_push_blocking(uiAvgFilterOut);
+        }
+        if(!gpio_get(CH_FILTER_GPIO) && !chFilterIn)
+        {
+            chFilterIn = true;
+            multicore_fifo_push_blocking(uiChFilterIn);
+        }
+        if(gpio_get(CH_FILTER_GPIO) && chFilterIn)
+        {
+            chFilterIn = false;
+            multicore_fifo_push_blocking(uiChFilterOut);
+        }
+        if (!gpio_get(ALE_GPIO) && !aleIn)
+        {
+            aleIn = true;
+            multicore_fifo_push_blocking(uiALEIn);
+        }
+        if (gpio_get(ALE_GPIO) && aleIn)
+        {
+            aleIn = false;
+            multicore_fifo_push_blocking(uiALEOut);
+        }
+        if (!gpio_get(ALE_MODE_GPIO) && !aleAutoNotch)
+        {
+            aleAutoNotch = true;
+            aleNoiseRed = false;
+            multicore_fifo_push_blocking(uiALEAutoNotch);
+        }
+        if (gpio_get(ALE_MODE_GPIO) && !aleNoiseRed)
+        {
+            aleAutoNotch = false;
+            aleNoiseRed = true;
+            multicore_fifo_push_blocking(uiALENoiseRed);
+        }
+            
+        // ADC reads and see if the ADC value has changed from last time.
+        for(int n=0; n < NUM_ADC_CH; n++)
+        {
+            adc[n] = read_adc(n);  // Centre frequency
+            adcChange[n] = false;
+            if(abs(adc[n] - lastAdc[n]) > ADC_HYSTERISIS)
+                adcChange[n] = true;
+            lastAdc[n] = adc[n];
+        } 
 
-        multicore_fifo_push_blocking(uiAvgFilterOut);
-        multicore_fifo_push_blocking(uiChFilterIn);
-        multicore_fifo_push_blocking(uiNCOut);
-        multicore_fifo_push_blocking(uiNCAutoNotch);
+        // FFT not used at the moment.
+        //multicore_fifo_push_blocking(uiFFTOut);
 
-/*
-    // For MATLAB
-    printf("ntaps=%u\n", ntaps);
-    for(uint i=0; i < ntaps; i++)
-        printf("%f\n",h[i]);
-*/      sleep_ms(100);
+        sleep_ms(100);
 
     }
     
@@ -204,6 +327,9 @@ void core1_main()
     return;
 }
 
+
+
+
 //-----------------------------------------------------------------------------------------------
 // Core 0 Main entry point
 // Core 0 handles the signal path                                                                     
@@ -217,43 +343,37 @@ void main()
     uint my_adc_semaphore = 0;
     uint capture_base = 0;
     uint output_base = 0;
+    uint32_t numDelayTaps = DELAY;
     
-    // Averaging filter
-    q15_t avgCoeffs[NAVG];
-    q15_t avgState[NAVG+FRAME_LENGTH-1];
-    arm_fir_instance_q15 AvgFilterObj;
-
-    // Channel filter
-    arm_fir_instance_q15 FIRFilterObj;
-    q15_t FIRcoeffs[MAX_NTAPS];
-    q15_t FIRstate[MAX_NTAPS];
-
-    // LMS Filter
-    arm_lms_norm_instance_q15 LMSFilterObj;
-    q15_t lmsCoeffs[NLMS];
-    q15_t lmsState[NLMS + FRAME_LENGTH-1];
-    q15_t mu = (q15_t)(32768.0 * 0.001);
-
-    q15_t dlyCoeffs[4];
-    q15_t dlyState[4+FRAME_LENGTH-1];
-    arm_fir_instance_q15 DlyFilterObj;
 
 
     // Signal path
     q15_t tmp1[FRAME_LENGTH];
-    q15_t tmp2[FRAME_LENGTH];
-    q15_t tmp3[FRAME_LENGTH];
     q15_t avgFilterOut[FRAME_LENGTH];
-    q15_t chFilterOut[FRAME_LENGTH];
-    q15_t ncOut[FRAME_LENGTH];
+    q15_t chFilterOut[FRAME_LENGTH]; 
+
+#if F32_LMS
+    float32_t delayIn[FRAME_LENGTH];
+    float32_t delayOut[FRAME_LENGTH];
+    float32_t aleOut1[FRAME_LENGTH];
+    float32_t aleOut2[FRAME_LENGTH];
+#else
+    q15_t delayIn[FRAME_LENGTH];
+    q15_t delayOut[FRAME_LENGTH];
+    q15_t aleOut1[FRAME_LENGTH];
+    q15_t aleOut2[FRAME_LENGTH];
+#endif
+    float32_t fftInput[FRAME_LENGTH];
+    float32_t fftOutput[FRAME_LENGTH];
+    q15_t fftOut[FRAME_LENGTH];
     q15_t *pOut;  // Equal either to tmp1 or tmp2. Used to find the output data
 
     // Flags to control the signal path. Default is
-    // straight through, i.e. no filtering
     bool chFilterIn = false;
     bool avgFilterIn = false;
-    bool ncIn = false;
-    int ncMode = NOISE_RED;  // Either NOISE_RED (false) or AUTO_NOTCH (true)
+    bool aleIn = false;
+    bool fftIn = false;
+    int aleMode = NOISE_RED;  // Either NOISE_RED (false) or AUTO_NOTCH (true)
 
     stdio_init_all();
     setup_default_uart();
@@ -264,16 +384,40 @@ void main()
     for(int i=0; i < NAVG; i++)
         avgCoeffs[i] = (q15_t)(32768.0/(double)NAVG);
     arm_fir_init_q15(&AvgFilterObj, NAVG, avgCoeffs, avgState, FRAME_LENGTH);
+    
+    // Initialise the channel filter
+    for (int i=0; i < ntaps; i++)
+        FIRcoeffs[ntaps-i-1] = (q15_t)(h[i]*COEFF_SCALE);    
+    arm_fir_init_q15(&FIRFilterObj, ntaps, FIRcoeffs, FIRstate, FRAME_LENGTH);  
 
-    // Initialise the LMS filter
+    // Initialise the ALE delay line and LMS filter       
+#if F32_LMS
+    arm_fir_init_f32(&DelayObj, numDelayTaps, delayCoeffs, delayState, FRAME_LENGTH);
+    for(int i=0 ; i < numDelayTaps; i++)
+        delayCoeffs[i] = 0.0;
+    delayCoeffs[0] = 1.0;
+    arm_lms_init_f32(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH);
+#elif NORM_LMS
+    arm_fir_init_q15(&DelayObj, numDelayTaps, delayCoeffs, delayState, FRAME_LENGTH);
+    for(int i=0 ; i < numDelayTaps; i++)
+        delayCoeffs[i] = 0;
+    delayCoeffs[0] = 8192;
     for(int i=0; i < NLMS; i++)
-        lmsCoeffs[i] = (q15_t)(32768.0*0.5);
-    arm_lms_norm_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);		
-    /*for(int i=0; i < 4; i++)
-        dlyCoeffs[i]=0;
-    dlyCoeffs[3] = (q15_t)32767;
-    arm_fir_init_q15(&DlyFilterObj, 4, dlyCoeffs, dlyState, FRAME_LENGTH);
-*/
+        lmsCoeffs[i] = 1;
+    arm_lms_norm_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
+#else
+    arm_fir_init_q15(&DelayObj, numDelayTaps, delayCoeffs, delayState, FRAME_LENGTH);
+    for(int i=0 ; i < numDelayTaps; i++)
+        delayCoeffs[i] = 0;
+    delayCoeffs[0] = 32767;
+    arm_lms_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
+#endif
+
+   /*
+    * Iniitalise the FFT
+    */
+    arm_rfft_fast_init_128_f32(&FFTObj);
+    
     /*
      * Start the other core that deals with the UI
      */
@@ -282,7 +426,6 @@ void main()
     /*
      * Set up the audio ADC
      */
-    
     adc_gpio_init(ADC0_GPIO);
     adc_init();
     adc_select_input(CAPTURE_CHANNEL);   
@@ -414,34 +557,50 @@ void main()
             switch(multicore_fifo_pop_blocking())
             {
                 case uiAvgFilterIn:
-                    avgFilterIn = false;
+                    avgFilterIn = true;
                     break;
                 case uiAvgFilterOut:
                     avgFilterIn = false;
                     break;
                 case uiChFilterIn:
-                    chFilterIn = true;
+                    chFilterIn = true;                    
                     break;
                 case uiChFilterOut:
                     chFilterIn = false;
                     break;
-                case uiNCIn:
-                    ncIn = true;
+                case uiALEIn:
+#if F32_LMS
+                    arm_fir_init_f32(&DelayObj, numDelayTaps, delayCoeffs, delayState, FRAME_LENGTH);
+                    arm_lms_init_f32(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH);
+#elif NORM_LMS
+                    for(int i=0; i < NLMS; i++)
+                        lmsCoeffs[i] = 1;
+                    arm_lms_norm_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
+#else
+                    arm_lms_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
+#endif
+                    aleIn = true;
                     break;
-                case uiNCOut:
-                    ncIn = false;
+                case uiALEOut:
+                    aleIn = false;
                     break;
-                case uiNCAutoNotch:
-                    ncMode = AUTO_NOTCH;
+                case uiALEAutoNotch:
+                    aleMode = AUTO_NOTCH;
                     break;
-                case uiNCNoiseRed:
-                    ncMode = NOISE_RED;
+                case uiALENoiseRed:
+                    aleMode = NOISE_RED;
                     break;
-                case uiChFilterUpdate:
-                    //uint32_t save = spin_lock_blocking(lock);
+                case uiFFTIn:
+                    fftIn = true;
+                    break;
+                case uiFFTOut:
+                    fftIn = false;
+                    break;
+                case uiChFilterUpdate:                
+                    uint32_t save = spin_lock_blocking(lock);
                     for (int i=0; i < ntaps; i++)
-                        FIRcoeffs[ntaps-i-1] = (q15_t)(h[i]*32768.0);
-                    //spin_unlock(lock, save);
+                        FIRcoeffs[ntaps-i-1] = (q15_t)(h[i]*COEFF_SCALE);
+                    spin_unlock(lock, save);
                     arm_fir_init_q15(&FIRFilterObj, ntaps, FIRcoeffs, FIRstate, FRAME_LENGTH);
                     break;
                 // Invalid command - ignore
@@ -480,8 +639,8 @@ void main()
              * Shift the 12-bit input signal to 16 bits (1.15 format).
              */
             for(int i=0; i < FRAME_LENGTH; i++)
-                tmp1[i] = capture_buff[capture_base+i] << 3; // 12 to 16 bits   
-            
+                tmp1[i] = capture_buff[capture_base+i] << 3;
+
                 // Averaging Filter
                 if (avgFilterIn)                
                 {
@@ -492,25 +651,92 @@ void main()
                     pOut = tmp1;
 
                 // Channel Filter
+                
                 if (chFilterIn)
-                {                    
+                {
+                    /*
+                    
+                    int i,j;
+                    float32_t acc;
+                    for (i=0; i < FRAME_LENGTH; i++)
+                    {
+                        acc = 0.0;
+                        for(j=0; j < ntaps; j++)
+                        {
+                            acc += FIRcoeffs[j]*FIRstate[i+j];
+                        }
+                        FIRstate[i] = pOut[i];
+                        chFilterOut[i] = (q15_t)(acc/32768.0);
+                    }
+                        */
+                        
                     arm_fir_q15(&FIRFilterObj, pOut, chFilterOut, FRAME_LENGTH);
                     pOut = chFilterOut;
                 }
 
-                // Noise Cancellation
-                if (ncIn)
+                // Automatic Line Enhancer (ALE)
+                if (aleIn)
                 {
-                    //arm_fir_q15(&DlyFilterObj, pOut, dly, FRAME_LENGTH);
-                    //arm_lms_norm_q15(&LMSFilterObj, pIn, nCOut, tmp2, tmp3, FRAME_LENGTH);
-                    //if (ncMode == NOISE_RED)                
-                    //    pOut = tmp2;
-                    //else
-                    //    pOut = tmp3;                        
-                    //}	 	        
+#if F32_LMS
+                    for(int i=0; i < FRAME_LENGTH; i++)
+                        delayIn[i] = (float32_t)pOut[i]/32768.0;
+                    arm_fir_f32(&DelayObj, delayIn, delayOut, FRAME_LENGTH); 
+                    arm_lms_f32(&LMSFilterObj, delayOut, delayIn, aleOut1, aleOut2, FRAME_LENGTH);
+                    for(int i=0; i < FRAME_LENGTH;i++)
+                    {                    
+                        pOut[n] = aleMode == NOISE_RED ?  (q15_t)(aleOut1[i]*32768.0) : (q15_t)(aleOut2[i]*32768.0);                    
+                    }
+#elif NORM_LMS
+                    arm_fir_q15(&DelayObj, pOut, delayOut, FRAME_LENGTH); 
+                    arm_lms_norm_q15(&LMSFilterObj, delayOut, pOut, aleOut1, aleOut2, FRAME_LENGTH);                    
+                    pOut = aleMode == NOISE_RED ? aleOut1 : aleOut2;                
+#else
+                    arm_fir_q15(&DelayObj, pOut, delayOut, FRAME_LENGTH); 
+                    arm_lms_q15(&LMSFilterObj, pOut, delayIn, aleOut1, aleOut2, FRAME_LENGTH);
+#endif
                 }
+#if 0
+                // FFT Noise reduction
+                if (fftIn)
+                {
+
+                    // Convert Q15 to float
+                    for(int n=0; n < FRAME_LENGTH; n++)
+                        fftInput[n] = (float)pOut[n]/32768.0;
                     
-            
+                    // Forward FFT
+                    arm_rfft_fast_f32(&FFTObj, fftInput, fftOutput, 0);
+
+                    /*
+                     *  Do the noise reduction on fftOutput (float32_t)
+                     */
+
+                     /*
+                    // For MATLAB                    
+                    for(uint i=0; i < FRAME_LENGTH; i++)
+                        printf("%f\n",fftOutput[i]);
+                    */
+                    float32_t threshold = 0.05;
+                    for(int n=0; n < FRAME_LENGTH; n++)
+                    {
+                        float32_t m = fabs(fftOutput[n]);
+                        if (m < threshold)
+                            fftInput[n] = 0.0;
+                        else
+                            fftInput[n] = fftOutput[n];
+                    }
+                    //memcpy((void *)fftInput, (void *)fftOutput, FRAME_LENGTH*sizeof(float32_t));
+                    
+                    // Inverse FFT
+                    arm_rfft_fast_f32(&FFTObj, fftInput, fftOutput, 1);
+
+                    // Convert float32_t output back to Q15
+                    for(int n=0; n < FRAME_LENGTH; n++)
+                        fftOut[n] = (q15_t)(fftOutput[n]*32768.0);
+                    pOut = fftOut;
+
+                }
+#endif
             /*
              * Output the signal to the I2S buffer
              */

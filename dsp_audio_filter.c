@@ -43,8 +43,6 @@
 #define ALE_GPIO 5
 #define ALE_MODE_GPIO  6
 #define I2S_DATA_GPIO 18  // Pin 24, 25, 26
-
-
 #define FRAME_LENGTH 128
 #define ADC_RING_BITS 8
 #define I2S_RING_BITS 9
@@ -108,9 +106,6 @@ const uint32_t uiFFTIn          = 10;
 const uint32_t uiFFTOut         = 11;
 
 spin_lock_t *lock;
-float32_t h[MAX_TAPS];
-uint16_t ntaps;
-
 uint32_t time1, time2;
 
 /*
@@ -128,11 +123,12 @@ arm_fir_instance_q15 AvgFilterObj;
 q15_t avgCoeffs[NAVG];
 q15_t avgState[NAVG+FRAME_LENGTH];
 
-
 /* Channel filter
  * All in global space so the spin-lock protects
  * FIRFilterObj, FIRcoeffs, FIRstate
  */
+float32_t h[MAX_TAPS];
+uint16_t ntaps;
 arm_fir_instance_q15 FIRFilterObj;
 q15_t FIRcoeffs[MAX_NTAPS];
 q15_t FIRstate[MAX_NTAPS+FRAME_LENGTH];
@@ -142,31 +138,16 @@ q15_t FIRstate[MAX_NTAPS+FRAME_LENGTH];
  * so that the spinlock protects DelayObj, LMSFilterObj,
  * delayCoeffs, delayState, lmsCoeffs, lmsState
  */
-#if F32_LMS
-float32_t delayCoeffs[MAX_DELAY];
-float32_t delayState[MAX_DELAY+FRAME_LENGTH];
-float32_t lmsCoeffs[NLMS];
-float32_t lmsState[NLMS+FRAME_LENGTH];
-float32_t mu = MU;
-arm_fir_instance_f32 DelayObj;
-arm_lms_instance_f32 LMSFilterObj;
-#else
+uint32_t numDelayTaps = DELAY;
 q15_t delayCoeffs[MAX_DELAY];
 q15_t delayState[MAX_DELAY+FRAME_LENGTH];
 q15_t lmsCoeffs[NLMS];
 q15_t lmsState[NLMS+FRAME_LENGTH];
 q15_t mu = (q15_t)(32768.0 * MU);
-#endif
-
-#if NORM_LMS
 arm_fir_instance_q15 DelayObj;
 arm_lms_norm_instance_q15 LMSFilterObj;
-#else
-arm_fir_instance_q15 DelayObj;
-arm_lms_instance_q15 LMSFilterObj;
-#endif
 
-arm_rfft_fast_instance_f32 FFTObj;
+//arm_rfft_fast_instance_f32 FFTObj;
 
 //-----------------------------------------------------------------------------------------------
 // Core 1 main entry point                                                                       
@@ -187,26 +168,17 @@ void core1_main()
     float32_t fH = 900;            // Hz upper corner frequency
     float32_t Bt = 80;             // Hz transition bandwidth
     float32_t AdB = 50;            // dB stop-band attenuation
-    
+    uint32_t save; // Used for the spin-lock
+
     printf("Core 1 up\n");
     
-    // Set up GPIOs
-    gpio_init(FC_AND_B_SEL_GPIO);
-    gpio_init(AVG_FILTER_GPIO);
-    gpio_init(CH_FILTER_GPIO);
-    gpio_init(ALE_GPIO);
-    gpio_init(ALE_MODE_GPIO);
-    gpio_set_dir(FC_AND_B_SEL_GPIO, GPIO_IN);
-    gpio_set_dir(AVG_FILTER_GPIO, GPIO_IN);
-    gpio_set_dir(CH_FILTER_GPIO, GPIO_IN);
-    gpio_set_dir(ALE_GPIO, GPIO_IN);
-    gpio_set_dir(ALE_MODE_GPIO, GPIO_IN);
-    gpio_pull_up(FC_AND_B_SEL_GPIO);
-    gpio_pull_up(AVG_FILTER_GPIO);
-    gpio_pull_up(CH_FILTER_GPIO);
-    gpio_pull_up(ALE_GPIO);
-    gpio_pull_up(ALE_MODE_GPIO);
-
+    // Set up GPIOs. They are sequential
+    for (int i=FC_AND_B_SEL_GPIO; i < (ALE_MODE_GPIO+1); i++)
+    {
+        gpio_init(i);  
+        gpio_set_dir(i, GPIO_IN);  
+        gpio_pull_up(i);
+    }
 
     // Initialise the I2C interface and ADS1015 ADC
     ads1015_init();
@@ -214,12 +186,18 @@ void core1_main()
     // Zero the last ADC values
     memset((void *)lastAdc, 0, sizeof(int16_t)*NUM_ADC_CH);
 
-    // Force the filter taps to be computed.
-    adcChange[0] = true;
-    
     while(1)
-    {
-       
+    {    
+        // ADCs read and see if the ADC value has changed from last time.
+        for(int n=0; n < NUM_ADC_CH; n++)
+        {
+            adcChange[n] = false;
+            adc[n] = read_adc(n);  // Centre frequency
+            if(abs(adc[n] - lastAdc[n]) > ADC_HYSTERISIS)
+                adcChange[n] = true;
+            lastAdc[n] = adc[n];
+        } 
+
         if(adcChange[0] || adcChange[1])
         {
             if (gpio_get(FC_AND_B_SEL_GPIO)==0)
@@ -240,14 +218,10 @@ void core1_main()
             fH = fH < F_MIN ? F_MIN:fH;
             fH = fH > F_MAX ? F_MAX:fH;
             
-            float32_t local_h[MAX_TAPS];
-            uint16_t local_ntaps = kaiserFindN(AdB, Bt/fs);   
-            wsfirKBP(local_h, local_ntaps, fL/fs, fH/fs, AdB); 
-
             // h and ntaps are accessed by core0 so need a lock
-            uint32_t save = spin_lock_blocking(lock);
-            ntaps = local_ntaps;
-            memcpy((void *)h, (void *)local_h, local_ntaps*sizeof(float32_t));
+            save = spin_lock_blocking(lock);
+            ntaps = kaiserFindN(AdB, Bt/fs);   
+            wsfirKBP(h, ntaps, fL/fs, fH/fs, AdB); 
             spin_unlock(lock, save);
             multicore_fifo_push_blocking(uiChFilterUpdate);
         }        
@@ -294,28 +268,15 @@ void core1_main()
             aleNoiseRed = true;
             multicore_fifo_push_blocking(uiALENoiseRed);
         }
-            
-        // ADC reads and see if the ADC value has changed from last time.
-        for(int n=0; n < NUM_ADC_CH; n++)
-        {
-            adc[n] = read_adc(n);  // Centre frequency
-            adcChange[n] = false;
-            if(abs(adc[n] - lastAdc[n]) > ADC_HYSTERISIS)
-                adcChange[n] = true;
-            lastAdc[n] = adc[n];
-        } 
 
-        // FFT not used at the moment.
-        //multicore_fifo_push_blocking(uiFFTOut);
-
-        sleep_ms(100);
+        sleep_ms(10);
 
     }
     
     /*while(1)
     {
         sleep_ms(100);
-        uint32_t save = spin_lock_blocking(lock);
+        save = spin_lock_blocking(lock);
         int duration = time2-time1;
         if (duration > 0)
             printf("duration = %d us\n", (int)duration);
@@ -343,29 +304,16 @@ void main()
     uint my_adc_semaphore = 0;
     uint capture_base = 0;
     uint output_base = 0;
-    uint32_t numDelayTaps = DELAY;
-    
-
+    uint32_t save;  // Used for the spin-lock
 
     // Signal path
     q15_t tmp1[FRAME_LENGTH];
     q15_t avgFilterOut[FRAME_LENGTH];
     q15_t chFilterOut[FRAME_LENGTH]; 
-
-#if F32_LMS
-    float32_t delayIn[FRAME_LENGTH];
-    float32_t delayOut[FRAME_LENGTH];
-    float32_t aleOut1[FRAME_LENGTH];
-    float32_t aleOut2[FRAME_LENGTH];
-#else
     q15_t delayIn[FRAME_LENGTH];
     q15_t delayOut[FRAME_LENGTH];
     q15_t aleOut1[FRAME_LENGTH];
     q15_t aleOut2[FRAME_LENGTH];
-#endif
-    float32_t fftInput[FRAME_LENGTH];
-    float32_t fftOutput[FRAME_LENGTH];
-    q15_t fftOut[FRAME_LENGTH];
     q15_t *pOut;  // Equal either to tmp1 or tmp2. Used to find the output data
 
     // Flags to control the signal path. Default is
@@ -373,14 +321,14 @@ void main()
     bool avgFilterIn = false;
     bool aleIn = false;
     bool fftIn = false;
-    int aleMode = NOISE_RED;  // Either NOISE_RED (false) or AUTO_NOTCH (true)
+    uint32_t aleMode = NOISE_RED;  // Either NOISE_RED or AUTO_NOTCH
 
     stdio_init_all();
     setup_default_uart();
     lock = spin_lock_init(SPIN_LOCK_ID);
     critical_section_init(&myCS);
    
-    // initialise the averaging filter
+    // Initialise the averaging filter
     for(int i=0; i < NAVG; i++)
         avgCoeffs[i] = (q15_t)(32768.0/(double)NAVG);
     arm_fir_init_q15(&AvgFilterObj, NAVG, avgCoeffs, avgState, FRAME_LENGTH);
@@ -391,32 +339,13 @@ void main()
     arm_fir_init_q15(&FIRFilterObj, ntaps, FIRcoeffs, FIRstate, FRAME_LENGTH);  
 
     // Initialise the ALE delay line and LMS filter       
-#if F32_LMS
-    arm_fir_init_f32(&DelayObj, numDelayTaps, delayCoeffs, delayState, FRAME_LENGTH);
-    for(int i=0 ; i < numDelayTaps; i++)
-        delayCoeffs[i] = 0.0;
-    delayCoeffs[0] = 1.0;
-    arm_lms_init_f32(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH);
-#elif NORM_LMS
-    arm_fir_init_q15(&DelayObj, numDelayTaps, delayCoeffs, delayState, FRAME_LENGTH);
-    for(int i=0 ; i < numDelayTaps; i++)
-        delayCoeffs[i] = 0;
-    delayCoeffs[0] = 8192;
-    for(int i=0; i < NLMS; i++)
-        lmsCoeffs[i] = 1;
-    arm_lms_norm_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
-#else
     arm_fir_init_q15(&DelayObj, numDelayTaps, delayCoeffs, delayState, FRAME_LENGTH);
     for(int i=0 ; i < numDelayTaps; i++)
         delayCoeffs[i] = 0;
     delayCoeffs[0] = 32767;
-    arm_lms_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
-#endif
-
-   /*
-    * Iniitalise the FFT
-    */
-    arm_rfft_fast_init_128_f32(&FFTObj);
+    for(int i=0; i < NLMS; i++)
+        lmsCoeffs[i] = 1;
+    arm_lms_norm_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
     
     /*
      * Start the other core that deals with the UI
@@ -452,7 +381,6 @@ void main()
      */
     i2s_semaphore = 0;
     adc_semaphore = 0;
-
     adc_dma0_chan = dma_claim_unused_channel(true);
     adc_dma1_chan = dma_claim_unused_channel(true);
     i2s_dma0_chan = dma_claim_unused_channel(true);
@@ -569,16 +497,11 @@ void main()
                     chFilterIn = false;
                     break;
                 case uiALEIn:
-#if F32_LMS
-                    arm_fir_init_f32(&DelayObj, numDelayTaps, delayCoeffs, delayState, FRAME_LENGTH);
-                    arm_lms_init_f32(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH);
-#elif NORM_LMS
+                    save = spin_lock_blocking(lock);
                     for(int i=0; i < NLMS; i++)
                         lmsCoeffs[i] = 1;
                     arm_lms_norm_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
-#else
-                    arm_lms_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
-#endif
+                    spin_unlock(lock, save);
                     aleIn = true;
                     break;
                 case uiALEOut:
@@ -590,18 +513,12 @@ void main()
                 case uiALENoiseRed:
                     aleMode = NOISE_RED;
                     break;
-                case uiFFTIn:
-                    fftIn = true;
-                    break;
-                case uiFFTOut:
-                    fftIn = false;
-                    break;
                 case uiChFilterUpdate:                
-                    uint32_t save = spin_lock_blocking(lock);
+                    save = spin_lock_blocking(lock);
                     for (int i=0; i < ntaps; i++)
                         FIRcoeffs[ntaps-i-1] = (q15_t)(h[i]*COEFF_SCALE);
-                    spin_unlock(lock, save);
                     arm_fir_init_q15(&FIRFilterObj, ntaps, FIRcoeffs, FIRstate, FRAME_LENGTH);
+                    spin_unlock(lock, save);
                     break;
                 // Invalid command - ignore
                 default:
@@ -630,8 +547,7 @@ void main()
         if (adc_isr_flag)
         {
             time1 = time_us_32();
-            adc_isr_flag = false;
-            
+            adc_isr_flag = false;            
             capture_base = (1-my_adc_semaphore)*FRAME_LENGTH;
             output_base = (1-my_adc_semaphore)*FRAME_LENGTH;
 
@@ -650,26 +566,9 @@ void main()
                 else
                     pOut = tmp1;
 
-                // Channel Filter
-                
+                // Channel Filter                
                 if (chFilterIn)
-                {
-                    /*
-                    
-                    int i,j;
-                    float32_t acc;
-                    for (i=0; i < FRAME_LENGTH; i++)
-                    {
-                        acc = 0.0;
-                        for(j=0; j < ntaps; j++)
-                        {
-                            acc += FIRcoeffs[j]*FIRstate[i+j];
-                        }
-                        FIRstate[i] = pOut[i];
-                        chFilterOut[i] = (q15_t)(acc/32768.0);
-                    }
-                        */
-                        
+                {                       
                     arm_fir_q15(&FIRFilterObj, pOut, chFilterOut, FRAME_LENGTH);
                     pOut = chFilterOut;
                 }
@@ -677,87 +576,18 @@ void main()
                 // Automatic Line Enhancer (ALE)
                 if (aleIn)
                 {
-#if F32_LMS
-                    for(int i=0; i < FRAME_LENGTH; i++)
-                        delayIn[i] = (float32_t)pOut[i]/32768.0;
-                    arm_fir_f32(&DelayObj, delayIn, delayOut, FRAME_LENGTH); 
-                    arm_lms_f32(&LMSFilterObj, delayOut, delayIn, aleOut1, aleOut2, FRAME_LENGTH);
-                    for(int i=0; i < FRAME_LENGTH;i++)
-                    {                    
-                        pOut[n] = aleMode == NOISE_RED ?  (q15_t)(aleOut1[i]*32768.0) : (q15_t)(aleOut2[i]*32768.0);                    
-                    }
-#elif NORM_LMS
                     arm_fir_q15(&DelayObj, pOut, delayOut, FRAME_LENGTH); 
                     arm_lms_norm_q15(&LMSFilterObj, delayOut, pOut, aleOut1, aleOut2, FRAME_LENGTH);                    
                     pOut = aleMode == NOISE_RED ? aleOut1 : aleOut2;                
-#else
-                    arm_fir_q15(&DelayObj, pOut, delayOut, FRAME_LENGTH); 
-                    arm_lms_q15(&LMSFilterObj, pOut, delayIn, aleOut1, aleOut2, FRAME_LENGTH);
-#endif
                 }
-#if 0
-                // FFT Noise reduction
-                if (fftIn)
-                {
 
-                    // Convert Q15 to float
-                    for(int n=0; n < FRAME_LENGTH; n++)
-                        fftInput[n] = (float)pOut[n]/32768.0;
-                    
-                    // Forward FFT
-                    arm_rfft_fast_f32(&FFTObj, fftInput, fftOutput, 0);
-
-                    /*
-                     *  Do the noise reduction on fftOutput (float32_t)
-                     */
-
-                     /*
-                    // For MATLAB                    
-                    for(uint i=0; i < FRAME_LENGTH; i++)
-                        printf("%f\n",fftOutput[i]);
-                    */
-                    float32_t threshold = 0.05;
-                    for(int n=0; n < FRAME_LENGTH; n++)
-                    {
-                        float32_t m = fabs(fftOutput[n]);
-                        if (m < threshold)
-                            fftInput[n] = 0.0;
-                        else
-                            fftInput[n] = fftOutput[n];
-                    }
-                    //memcpy((void *)fftInput, (void *)fftOutput, FRAME_LENGTH*sizeof(float32_t));
-                    
-                    // Inverse FFT
-                    arm_rfft_fast_f32(&FFTObj, fftInput, fftOutput, 1);
-
-                    // Convert float32_t output back to Q15
-                    for(int n=0; n < FRAME_LENGTH; n++)
-                        fftOut[n] = (q15_t)(fftOutput[n]*32768.0);
-                    pOut = fftOut;
-
-                }
-#endif
             /*
              * Output the signal to the I2S buffer
              */
             for(int i=0; i < FRAME_LENGTH; i++)
-                output_buff[output_base+i] = (int32_t)((pOut[i] << 16) | pOut[i]);
-        
-        /*
-            // Straight-through connection
-            for(int n=0; n < FRAME_LENGTH; n++)
-            {
-                int16_t x = capture_buff[capture_base+n] << 3; // 12 to 16 bits
-                output_buff[output_base+n] = (int32_t)((x << 16) | x);
-            
-            }
-        */
+                output_buff[output_base+i] = (int32_t)((pOut[i] << 16) | pOut[i]);        
             time2 = time_us_32();
         }
-
-
-
-
     }
 
     /*

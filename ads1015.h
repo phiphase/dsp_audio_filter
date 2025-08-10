@@ -8,7 +8,7 @@
   */
 #ifndef __ADS1015_H__
 #define __ADS1015_H__
-#include "pico/stdlib.h"  // Included so that the int16_t/uint16_t/float32_t32_t types are available.
+#include "pico/stdlib.h"  // Included so that the int16_t/uint16_t/float32_t types are available.
 
 #define I2C_DEV i2c1
 #define I2C1_SDA_GPIO 14       // GPIO pin for the I2C data (physical pin 19 on rpi pico2 module)

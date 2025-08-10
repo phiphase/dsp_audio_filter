@@ -36,12 +36,16 @@
 #include "filter.h"
 #include "ads1015.h"
 
+//#define PROFILE  // Enable printing of microseconds spent by core 0 doing DSP.
 #define ADC0_GPIO 26 // Pin 31
 #define FC_AND_B_SEL_GPIO 2   // Take GPIO2 (pin 4) low to enable centre frequency/bandwidth control
 #define AVG_FILTER_GPIO 3
 #define CH_FILTER_GPIO 4
 #define ALE_GPIO 5
 #define ALE_MODE_GPIO  6
+#define CW__GPIO 7
+#define CW_KEYER_DOT_GPIO 8
+#define CW_KEYER_DASH_GPIO 9
 #define I2S_DATA_GPIO 18  // Pin 24, 25, 26
 #define FRAME_LENGTH 128
 #define ADC_RING_BITS 8
@@ -62,7 +66,7 @@
 #define ADC_MAX 1635     // Maximum ADC output
 #define ADC_MIN 2        // Minimum ADC output
 #define ADC_HYSTERISIS 5 // The amount that the filter corner frequency ADCs have to change by
-#define MU 0.01         // LMS algorithm mu
+#define MU 0.07         // LMS algorithm mu
 #define NLMS 32         // Number of taps for the LMS filter. Must be a multiple of 4.
 #define DELAY 4          // ALE Delay line length
 #define MAX_DELAY 32     // Maximum ALE Delay line length
@@ -79,6 +83,7 @@
  */
 int16_t capture_buff[2*FRAME_LENGTH] __attribute__((aligned(sizeof(int16_t)*2*FRAME_LENGTH)));
 int32_t output_buff[2*FRAME_LENGTH] __attribute__((aligned(sizeof(int32_t)*2*FRAME_LENGTH)));
+void gpio_callback(uint gpio, uint32_t events);
 
 /*
  * Global so that interrupt handlers have access
@@ -102,12 +107,12 @@ const uint32_t uiALEIn           = 6;
 const uint32_t uiALEOut          = 7;
 const uint32_t uiALEAutoNotch    = 8;
 const uint32_t uiALENoiseRed     = 9;
-const uint32_t uiFFTIn          = 10;
-const uint32_t uiFFTOut         = 11;
 
 spin_lock_t *lock;
-uint32_t time1, time2;
 
+#ifdef PROFILE
+uint32_t time1, time2;
+#endif
 /*
  * The DMA interrupt handlers and the critical section object
  */
@@ -147,10 +152,8 @@ q15_t mu = (q15_t)(32768.0 * MU);
 arm_fir_instance_q15 DelayObj;
 arm_lms_norm_instance_q15 LMSFilterObj;
 
-//arm_rfft_fast_instance_f32 FFTObj;
-
 //-----------------------------------------------------------------------------------------------
-// Core 1 main entry point                                                                       
+// CORE-1 MAIN ENTRY POINT                                                                       
 // Core 1 handles the user interface and creates the filter coefficients.  It passes commands
 // to core-0 when the user interface is changed.                                                                 
 //-----------------------------------------------------------------------------------------------
@@ -158,34 +161,77 @@ void core1_main()
 {
     int16_t adc[NUM_ADC_CH], lastAdc[NUM_ADC_CH];
     bool adcChange[NUM_ADC_CH];  // Flags for ADC value change
-    bool avgFilterIn = false;
-    bool chFilterIn = false;
-    bool aleIn = false;
-    bool aleAutoNotch = false;
-    bool aleNoiseRed = false;
-    const float32_t fs = FS;       // Hz Sample rate
-    float32_t fL = 600;            // Hz lower corner frequency
-    float32_t fH = 900;            // Hz upper corner frequency
-    float32_t Bt = 80;             // Hz transition bandwidth
-    float32_t AdB = 50;            // dB stop-band attenuation
-    uint32_t save; // Used for the spin-lock
+    const float32_t fs = FS;    // Hz Sample rate
+    float32_t fL = 600;         // Hz lower corner frequency
+    float32_t fH = 900;         // Hz upper corner frequency
+    float32_t Bt = 80;          // Hz transition bandwidth
+    float32_t AdB = 50;         // dB stop-band attenuation
+    uint32_t save;              // Used for the spin-lock
+#ifdef PROFILE
+    double timeAvailable_us = (FRAME_LENGTH/fs)*1.0E6;
+#endif
 
     printf("Core 1 up\n");
     
-    // Set up GPIOs. They are sequential
-    for (int i=FC_AND_B_SEL_GPIO; i < (ALE_MODE_GPIO+1); i++)
+    /*
+     * Initial channel filter setup
+     * Force an initialisation of the filter.
+     */
+    // h and ntaps are accessed by core0 so need a lock    
+    save = spin_lock_blocking(lock);
+    ntaps = kaiserFindN(AdB, Bt/fs);   
+    wsfirKBP(h, ntaps, fL/fs, fH/fs, AdB); 
+    spin_unlock(lock, save);
+    multicore_fifo_push_blocking(uiChFilterUpdate);
+
+    /*
+     * Set up GPIOs. They are on sequential pins
+     */
+    for (int i=FC_AND_B_SEL_GPIO; i < (CW_KEYER_DASH_GPIO+1); i++)
     {
         gpio_init(i);  
         gpio_set_dir(i, GPIO_IN);  
         gpio_pull_up(i);
     }
 
-    // Initialise the I2C interface and ADS1015 ADC
-    ads1015_init();
-    
-    // Zero the last ADC values
+    /*
+     * Set up the callbacks for the GPIO IRQs
+     */
+    gpio_set_irq_enabled_with_callback(AVG_FILTER_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+    gpio_set_irq_enabled(CH_FILTER_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(ALE_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(ALE_MODE_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+
+    /*
+     * Initialise the I2C interface and ADS1015 ADC and Zero the last ADC values
+     */
+    ads1015_init();  
     memset((void *)lastAdc, 0, sizeof(int16_t)*NUM_ADC_CH);
 
+    /*
+     * Set the initial filters in/out according to pin states since the interrupts are edge-triggered
+     */
+    if(!gpio_get(AVG_FILTER_GPIO))
+        multicore_fifo_push_blocking(uiAvgFilterIn);
+    else
+        multicore_fifo_push_blocking(uiAvgFilterOut);
+    if(!gpio_get(CH_FILTER_GPIO))
+        multicore_fifo_push_blocking(uiChFilterIn);
+    else
+        multicore_fifo_push_blocking(uiChFilterOut);
+    if(!gpio_get(ALE_GPIO))
+        multicore_fifo_push_blocking(uiALEIn);
+    else
+        multicore_fifo_push_blocking(uiALEOut);
+    if(!gpio_get(ALE_MODE_GPIO))
+        multicore_fifo_push_blocking(uiALEAutoNotch);
+    else
+        multicore_fifo_push_blocking(uiALENoiseRed);
+
+    
+    /*
+     * MAIN PROCESSING LOOP FOR CORE 1.
+     */
     while(1)
     {    
         // ADCs read and see if the ADC value has changed from last time.
@@ -198,8 +244,12 @@ void core1_main()
             lastAdc[n] = adc[n];
         } 
 
+        /*
+         * Deal with ADC 0 (fL) and ADC 1 (fH) changes.
+         */
         if(adcChange[0] || adcChange[1])
         {
+            printf("ADC change\n");
             if (gpio_get(FC_AND_B_SEL_GPIO)==0)
             {
                 float fc = F_MIN + ((float)(adc[0]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (F_MAX- F_MIN);
@@ -224,64 +274,17 @@ void core1_main()
             wsfirKBP(h, ntaps, fL/fs, fH/fs, AdB); 
             spin_unlock(lock, save);
             multicore_fifo_push_blocking(uiChFilterUpdate);
-        }        
-
-        if (!gpio_get(AVG_FILTER_GPIO) && !avgFilterIn)
-        {
-            avgFilterIn = true;
-            multicore_fifo_push_blocking(uiAvgFilterIn);
         }
-        if(gpio_get(AVG_FILTER_GPIO) && avgFilterIn)
-        {
-            avgFilterIn = false;
-            multicore_fifo_push_blocking(uiAvgFilterOut);
-        }
-        if(!gpio_get(CH_FILTER_GPIO) && !chFilterIn)
-        {
-            chFilterIn = true;
-            multicore_fifo_push_blocking(uiChFilterIn);
-        }
-        if(gpio_get(CH_FILTER_GPIO) && chFilterIn)
-        {
-            chFilterIn = false;
-            multicore_fifo_push_blocking(uiChFilterOut);
-        }
-        if (!gpio_get(ALE_GPIO) && !aleIn)
-        {
-            aleIn = true;
-            multicore_fifo_push_blocking(uiALEIn);
-        }
-        if (gpio_get(ALE_GPIO) && aleIn)
-        {
-            aleIn = false;
-            multicore_fifo_push_blocking(uiALEOut);
-        }
-        if (!gpio_get(ALE_MODE_GPIO) && !aleAutoNotch)
-        {
-            aleAutoNotch = true;
-            aleNoiseRed = false;
-            multicore_fifo_push_blocking(uiALEAutoNotch);
-        }
-        if (gpio_get(ALE_MODE_GPIO) && !aleNoiseRed)
-        {
-            aleAutoNotch = false;
-            aleNoiseRed = true;
-            multicore_fifo_push_blocking(uiALENoiseRed);
-        }
-
-        sleep_ms(10);
-
-    }
-    
-    /*while(1)
-    {
-        sleep_ms(100);
+        
+#ifdef PROFILE
         save = spin_lock_blocking(lock);
         int duration = time2-time1;
-        if (duration > 0)
-            printf("duration = %d us\n", (int)duration);
         spin_unlock(lock, save);
-    }*/
+        if (duration > 0)
+            printf("DSP: %d us, utilisation = %1.1f %%\n", duration, 100.0*(double)duration/timeAvailable_us);
+#endif
+        sleep_ms(10);
+    }    
 
     printf("Core 1 exiting\n");
     sleep_ms(1000);
@@ -292,7 +295,7 @@ void core1_main()
 
 
 //-----------------------------------------------------------------------------------------------
-// Core 0 Main entry point
+// CORE-0 MAIN ENTRY POINT
 // Core 0 handles the signal path                                                                     
 //-----------------------------------------------------------------------------------------------
 void main()
@@ -316,42 +319,36 @@ void main()
     q15_t aleOut2[FRAME_LENGTH];
     q15_t *pOut;  // Equal either to tmp1 or tmp2. Used to find the output data
 
-    // Flags to control the signal path. Default is
-    bool chFilterIn = false;
+    // Flags to control the signal path.
     bool avgFilterIn = false;
+    bool chFilterIn = false;
     bool aleIn = false;
-    bool fftIn = false;
-    uint32_t aleMode = NOISE_RED;  // Either NOISE_RED or AUTO_NOTCH
+    bool aleAutoNotch = false;  // Either NOISE_RED or AUTO_NOTCH
 
     stdio_init_all();
     setup_default_uart();
     lock = spin_lock_init(SPIN_LOCK_ID);
     critical_section_init(&myCS);
    
-    // Initialise the averaging filter
-    for(int i=0; i < NAVG; i++)
-        avgCoeffs[i] = (q15_t)(32768.0/(double)NAVG);
-    arm_fir_init_q15(&AvgFilterObj, NAVG, avgCoeffs, avgState, FRAME_LENGTH);
-    
-    // Initialise the channel filter
-    for (int i=0; i < ntaps; i++)
-        FIRcoeffs[ntaps-i-1] = (q15_t)(h[i]*COEFF_SCALE);    
-    arm_fir_init_q15(&FIRFilterObj, ntaps, FIRcoeffs, FIRstate, FRAME_LENGTH);  
-
-    // Initialise the ALE delay line and LMS filter       
-    arm_fir_init_q15(&DelayObj, numDelayTaps, delayCoeffs, delayState, FRAME_LENGTH);
-    for(int i=0 ; i < numDelayTaps; i++)
-        delayCoeffs[i] = 0;
-    delayCoeffs[0] = 32767;
-    for(int i=0; i < NLMS; i++)
-        lmsCoeffs[i] = 1;
-    arm_lms_norm_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
-    
     /*
      * Start the other core that deals with the UI
      */
     multicore_launch_core1(core1_main);
 
+    // Initialise the averaging filter
+    for(int i=0; i < NAVG; i++)
+        avgCoeffs[i] = (q15_t)(32768.0/(double)NAVG);
+    arm_fir_init_q15(&AvgFilterObj, NAVG, avgCoeffs, avgState, FRAME_LENGTH);
+    
+    // Initialise the ALE delay line and LMS filter          
+    arm_fir_init_q15(&DelayObj, numDelayTaps, delayCoeffs, delayState, FRAME_LENGTH);
+    for(int i=0 ; i < numDelayTaps; i++)
+        delayCoeffs[i] = 0;
+    delayCoeffs[0] = 8192;
+    for(int i=0; i < NLMS; i++)
+        lmsCoeffs[i] = 1;
+    arm_lms_norm_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
+   
     /*
      * Set up the audio ADC
      */
@@ -508,10 +505,10 @@ void main()
                     aleIn = false;
                     break;
                 case uiALEAutoNotch:
-                    aleMode = AUTO_NOTCH;
+                    aleAutoNotch = true;
                     break;
                 case uiALENoiseRed:
-                    aleMode = NOISE_RED;
+                    aleAutoNotch = false;
                     break;
                 case uiChFilterUpdate:                
                     save = spin_lock_blocking(lock);
@@ -546,7 +543,11 @@ void main()
         */
         if (adc_isr_flag)
         {
+#ifdef PROFILE            
+            save = spin_lock_blocking(lock);
             time1 = time_us_32();
+            spin_unlock(lock, save);
+#endif            
             adc_isr_flag = false;            
             capture_base = (1-my_adc_semaphore)*FRAME_LENGTH;
             output_base = (1-my_adc_semaphore)*FRAME_LENGTH;
@@ -578,15 +579,20 @@ void main()
                 {
                     arm_fir_q15(&DelayObj, pOut, delayOut, FRAME_LENGTH); 
                     arm_lms_norm_q15(&LMSFilterObj, delayOut, pOut, aleOut1, aleOut2, FRAME_LENGTH);                    
-                    pOut = aleMode == NOISE_RED ? aleOut1 : aleOut2;                
+                    pOut = aleAutoNotch ? aleOut2 : aleOut1;
                 }
 
             /*
              * Output the signal to the I2S buffer
              */
             for(int i=0; i < FRAME_LENGTH; i++)
-                output_buff[output_base+i] = (int32_t)((pOut[i] << 16) | pOut[i]);        
+                output_buff[output_base+i] = (int32_t)((pOut[i] << 16) | pOut[i]);   
+
+#ifdef PROFILE
+            save = spin_lock_blocking(lock);
             time2 = time_us_32();
+            spin_unlock(lock, save);
+#endif            
         }
     }
 
@@ -642,4 +648,44 @@ void dma_isr_1()
         dma_channel_start(i2s_dma0_chan);
         i2s_semaphore = 0;
     } 
+}
+
+/*
+ * GPIO callback (interrupt handler) called by CORE-1
+ */
+void gpio_callback(uint gpio, uint32_t events)
+{
+
+    switch(gpio)
+    {
+        case AVG_FILTER_GPIO:
+            if (!gpio_get(AVG_FILTER_GPIO) && (events & GPIO_IRQ_EDGE_FALL))
+                multicore_fifo_push_blocking(uiAvgFilterIn);
+            if (gpio_get(AVG_FILTER_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
+                multicore_fifo_push_blocking(uiAvgFilterOut);                
+            break;
+
+        case CH_FILTER_GPIO:
+            if (!gpio_get(CH_FILTER_GPIO) && (events & GPIO_IRQ_EDGE_FALL))
+                multicore_fifo_push_blocking(uiChFilterIn);
+            if (gpio_get(CH_FILTER_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
+                multicore_fifo_push_blocking(uiChFilterOut);
+            break;
+        case ALE_GPIO:                      
+            if (!gpio_get(ALE_GPIO) && (events & GPIO_IRQ_EDGE_FALL))
+                multicore_fifo_push_blocking(uiALEIn);
+            if (gpio_get(ALE_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
+                multicore_fifo_push_blocking(uiALEOut);
+            break;
+        case ALE_MODE_GPIO:                      
+            if (!gpio_get(ALE_GPIO) && (events & GPIO_IRQ_EDGE_FALL))
+                multicore_fifo_push_blocking(uiALEAutoNotch);
+            if (gpio_get(ALE_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
+                multicore_fifo_push_blocking(uiALENoiseRed);
+            break;
+
+        default:
+            printf("un-supported GPIO\n");
+            break;
+    }
 }

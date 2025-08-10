@@ -35,6 +35,7 @@
 #include "arm_math.h"
 #include "filter.h"
 #include "ads1015.h"
+#include "cw.h"
 
 //#define PROFILE  // Enable printing of microseconds spent by core 0 doing DSP.
 #define ADC0_GPIO 26 // Pin 31
@@ -43,9 +44,10 @@
 #define CH_FILTER_GPIO 4
 #define ALE_GPIO 5
 #define ALE_MODE_GPIO  6
-#define CW__GPIO 7
+#define CW_GPIO 7
 #define CW_KEYER_DOT_GPIO 8
 #define CW_KEYER_DASH_GPIO 9
+#define CW_KEYER_OUT_GPIO 10
 #define I2S_DATA_GPIO 18  // Pin 24, 25, 26
 #define FRAME_LENGTH 128
 #define ADC_RING_BITS 8
@@ -73,7 +75,7 @@
 #define NOISE_RED 0      // ALE operates in noise reduction mode
 #define AUTO_NOTCH 1     // ALE operates in auto-notch mode
 #define NORM_LMS 1
-#define F32_LMS 0
+#define ST_PITCH 800     // Side-tone pitch, Hz
 
 /*
  * The ADC data buffer, capture_buf (16 bit) and
@@ -107,6 +109,17 @@ const uint32_t uiALEIn           = 6;
 const uint32_t uiALEOut          = 7;
 const uint32_t uiALEAutoNotch    = 8;
 const uint32_t uiALENoiseRed     = 9;
+const uint32_t uiCWOn            = 10;
+const uint32_t uiCWOff           = 11;
+const uint32_t uiCWDotOn         = 12;
+const uint32_t uiCWDotOff        = 13;
+const uint32_t uiCWDashOn        = 14;
+const uint32_t uiCWDashOff       = 15;
+const uint32_t uiCWDotDashOn     = 16;
+const uint32_t uiCWDotDashOff    = 17;
+const uint32_t uiCWDashDotOn     = 18;
+const uint32_t uiCWDashDotOff    = 19;
+
 
 spin_lock_t *lock;
 
@@ -152,6 +165,13 @@ q15_t mu = (q15_t)(32768.0 * MU);
 arm_fir_instance_q15 DelayObj;
 arm_lms_norm_instance_q15 LMSFilterObj;
 
+/*
+ * CW generator
+ */
+float32_t cwAmp = 0.1;
+uint32_t cwSpeed = 12;
+cw_gen_obj CWGenObj;
+
 //-----------------------------------------------------------------------------------------------
 // CORE-1 MAIN ENTRY POINT                                                                       
 // Core 1 handles the user interface and creates the filter coefficients.  It passes commands
@@ -176,8 +196,8 @@ void core1_main()
     /*
      * Initial channel filter setup
      * Force an initialisation of the filter.
+     * h and ntaps are accessed by core0 so need a lock 
      */
-    // h and ntaps are accessed by core0 so need a lock    
     save = spin_lock_blocking(lock);
     ntaps = kaiserFindN(AdB, Bt/fs);   
     wsfirKBP(h, ntaps, fL/fs, fH/fs, AdB); 
@@ -201,6 +221,9 @@ void core1_main()
     gpio_set_irq_enabled(CH_FILTER_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(ALE_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(ALE_MODE_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(CW_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(CW_KEYER_DOT_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(CW_KEYER_DASH_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
 
     /*
      * Initialise the I2C interface and ADS1015 ADC and Zero the last ADC values
@@ -228,7 +251,6 @@ void core1_main()
     else
         multicore_fifo_push_blocking(uiALENoiseRed);
 
-    
     /*
      * MAIN PROCESSING LOOP FOR CORE 1.
      */
@@ -317,6 +339,7 @@ void main()
     q15_t delayOut[FRAME_LENGTH];
     q15_t aleOut1[FRAME_LENGTH];
     q15_t aleOut2[FRAME_LENGTH];
+    q15_t cwOut[FRAME_LENGTH];
     q15_t *pOut;  // Equal either to tmp1 or tmp2. Used to find the output data
 
     // Flags to control the signal path.
@@ -324,11 +347,21 @@ void main()
     bool chFilterIn = false;
     bool aleIn = false;
     bool aleAutoNotch = false;  // Either NOISE_RED or AUTO_NOTCH
+    bool cwOn = false;
 
     stdio_init_all();
     setup_default_uart();
     lock = spin_lock_init(SPIN_LOCK_ID);
     critical_section_init(&myCS);
+
+    /*
+     * Initialise the Keyer GPIO output
+     * This is the DC key closure. It should be
+     * driven by DMA.
+     */
+    gpio_init(CW_KEYER_OUT_GPIO);
+    gpio_set_dir(CW_KEYER_OUT_GPIO, GPIO_OUT);
+    gpio_pull_up(CW_KEYER_OUT_GPIO);
    
     /*
      * Start the other core that deals with the UI
@@ -349,6 +382,11 @@ void main()
         lmsCoeffs[i] = 1;
     arm_lms_norm_init_q15(&LMSFilterObj, NLMS, lmsCoeffs, lmsState, mu, FRAME_LENGTH, 0);
    
+    /*
+     * Initialise the CW keyer/side-tone
+     */
+    init_cw(&CWGenObj, FS, ST_PITCH);
+
     /*
      * Set up the audio ADC
      */
@@ -517,6 +555,13 @@ void main()
                     arm_fir_init_q15(&FIRFilterObj, ntaps, FIRcoeffs, FIRstate, FRAME_LENGTH);
                     spin_unlock(lock, save);
                     break;
+                case uiCWOn:
+                    cwOn = true;
+                    break;
+                case uiCWOff:
+                    cwOn = false;
+                    break;
+
                 // Invalid command - ignore
                 default:
                     break;
@@ -580,6 +625,13 @@ void main()
                     arm_fir_q15(&DelayObj, pOut, delayOut, FRAME_LENGTH); 
                     arm_lms_norm_q15(&LMSFilterObj, delayOut, pOut, aleOut1, aleOut2, FRAME_LENGTH);                    
                     pOut = aleAutoNotch ? aleOut2 : aleOut1;
+                }
+
+                // CW Side-tone
+                if (cwOn)
+                {
+                    gen_cw(&CWGenObj, pOut, cwOut, cwAmp, FRAME_LENGTH);
+                    pOut = cwOut;
                 }
 
             /*
@@ -664,7 +716,6 @@ void gpio_callback(uint gpio, uint32_t events)
             if (gpio_get(AVG_FILTER_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
                 multicore_fifo_push_blocking(uiAvgFilterOut);                
             break;
-
         case CH_FILTER_GPIO:
             if (!gpio_get(CH_FILTER_GPIO) && (events & GPIO_IRQ_EDGE_FALL))
                 multicore_fifo_push_blocking(uiChFilterIn);
@@ -682,6 +733,50 @@ void gpio_callback(uint gpio, uint32_t events)
                 multicore_fifo_push_blocking(uiALEAutoNotch);
             if (gpio_get(ALE_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
                 multicore_fifo_push_blocking(uiALENoiseRed);
+            break;            
+        case CW_GPIO:
+            if (!gpio_get(CW_GPIO) && (events & GPIO_IRQ_EDGE_FALL))
+            {
+                //printf("CW on\n");
+                multicore_fifo_push_blocking(uiCWOn);
+            }
+            if (gpio_get(CW_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
+            {
+                //printf("CW off\n");
+                multicore_fifo_push_blocking(uiCWOff);
+            }
+            break;
+        case CW_KEYER_DOT_GPIO:
+            if (!gpio_get(CW_KEYER_DOT_GPIO) && (events & GPIO_IRQ_EDGE_FALL))
+            {
+                if(!gpio_get(CW_KEYER_DASH_GPIO))
+                    multicore_fifo_push_blocking(uiCWDashDotOn);
+                else
+                    multicore_fifo_push_blocking(uiCWDotOn);
+            }
+            if (gpio_get(CW_KEYER_DOT_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
+            {
+                multicore_fifo_push_blocking(uiCWDotOff);
+                if(!gpio_get(CW_KEYER_DASH_GPIO))
+                    multicore_fifo_push_blocking(uiCWDashOn);
+            }
+            break;
+
+        case CW_KEYER_DASH_GPIO:
+            if (!gpio_get(CW_KEYER_DASH_GPIO) && (events & GPIO_IRQ_EDGE_FALL))
+            {
+                if(!gpio_get(CW_KEYER_DOT_GPIO))
+                    multicore_fifo_push_blocking(uiCWDotDashOn);
+                else
+                    multicore_fifo_push_blocking(uiCWDashOn);
+            }
+
+            if (gpio_get(CW_KEYER_DASH_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
+            {
+                multicore_fifo_push_blocking(uiCWDashOff);
+                if(!gpio_get(CW_KEYER_DOT_GPIO))
+                    multicore_fifo_push_blocking(uiCWDotOn);  
+            }              
             break;
 
         default:

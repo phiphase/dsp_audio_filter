@@ -76,6 +76,8 @@
 #define AUTO_NOTCH 1     // ALE operates in auto-notch mode
 #define NORM_LMS 1
 #define ST_PITCH 800     // Side-tone pitch, Hz
+#define ST_VOL_MAX 0.5
+#define ST_VOL_MIN 0.005
 
 /*
  * The ADC data buffer, capture_buf (16 bit) and
@@ -231,6 +233,12 @@ void core1_main()
     ads1015_init();  
     memset((void *)lastAdc, 0, sizeof(int16_t)*NUM_ADC_CH);
 
+    // Set the initial volume of the side-tone.
+    adc[2] = read_adc(2);
+    save = spin_lock_blocking(lock);
+    cwAmp = ST_VOL_MIN + ((float32_t)(adc[2]-ADC_MIN)/(float32_t)(ADC_MAX-ADC_MIN)) * (ST_VOL_MAX - ST_VOL_MIN);
+    spin_unlock(lock, save);
+
     /*
      * Set the initial filters in/out according to pin states since the interrupts are edge-triggered
      */
@@ -250,6 +258,10 @@ void core1_main()
         multicore_fifo_push_blocking(uiALEAutoNotch);
     else
         multicore_fifo_push_blocking(uiALENoiseRed);
+    if(!gpio_get(CW_GPIO))
+        multicore_fifo_push_blocking(uiCWOn);
+    else
+        multicore_fifo_push_blocking(uiCWOff);
 
     /*
      * MAIN PROCESSING LOOP FOR CORE 1.
@@ -296,6 +308,15 @@ void core1_main()
             wsfirKBP(h, ntaps, fL/fs, fH/fs, AdB); 
             spin_unlock(lock, save);
             multicore_fifo_push_blocking(uiChFilterUpdate);
+        }
+
+        // Side-tone volume control
+        if(adcChange[2])
+        {
+            save = spin_lock_blocking(lock);
+            cwAmp = ST_VOL_MIN + ((float32_t)(adc[2]-ADC_MIN)/(float32_t)(ADC_MAX-ADC_MIN)) * (ST_VOL_MAX - ST_VOL_MIN);
+            spin_unlock(lock, save);
+
         }
         
 #ifdef PROFILE

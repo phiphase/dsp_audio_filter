@@ -17,16 +17,10 @@
 
 typedef struct
 {
-  float32_t phi;  // Sinewave phase angle
   float32_t dphi; // delta-phi to provide the side-tone frequency
-  uint8_t speed;  // CW keying speed
-  uint8_t state;  // mark = 1 (keyed), space = 0 (un-keyed)
+  uint64_t n;     // The sample number
  } cw_gen_obj;
 
 void init_cw(cw_gen_obj *obj, float32_t fs, float32_t fst);
 void gen_cw(cw_gen_obj *obj, q15_t * input, q15_t *output, float32_t amp, uint32_t numSamples);
-void gen_dot(cw_gen_obj *obj, q15_t * input, q15_t *output, float32_t amp, uint32_t speed, uint32_t numSamples);
-void gen_dash(cw_gen_obj *obj, q15_t * input, q15_t *output, float32_t amp, uint32_t speed, uint32_t numSamples);
-void gen_dot_dash(cw_gen_obj *obj, q15_t * input, q15_t *output, float32_t amp, uint32_t speed, uint32_t numSamples);
-void gen_dash_dot(cw_gen_obj *obj, q15_t * input, q15_t *output, float32_t amp, uint32_t speed, uint32_t numSamples);
 #endif

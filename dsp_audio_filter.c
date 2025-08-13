@@ -67,6 +67,8 @@
 #define B_MIN 100.0      // Minimum bandwidth
 #define ADC_MAX 1635     // Maximum ADC output
 #define ADC_MIN 2        // Minimum ADC output
+#define ADC2_MAX 1631    // Maximum ADC output
+#define ADC2_MIN 0       // Minimum ADC output
 #define ADC_HYSTERISIS 5 // The amount that the filter corner frequency ADCs have to change by
 #define MU 0.07         // LMS algorithm mu
 #define NLMS 32         // Number of taps for the LMS filter. Must be a multiple of 4.
@@ -76,8 +78,9 @@
 #define AUTO_NOTCH 1     // ALE operates in auto-notch mode
 #define NORM_LMS 1
 #define ST_PITCH 800     // Side-tone pitch, Hz
-#define ST_VOL_MAX 0.5
-#define ST_VOL_MIN 0.005
+#define ST_AMP 0.05      // Amplitude of the side-tone
+#define CW_WPM_MAX 40.0
+#define CW_WPM_MIN 5.0
 
 /*
  * The ADC data buffer, capture_buf (16 bit) and
@@ -87,7 +90,7 @@
  */
 int16_t capture_buff[2*FRAME_LENGTH] __attribute__((aligned(sizeof(int16_t)*2*FRAME_LENGTH)));
 int32_t output_buff[2*FRAME_LENGTH] __attribute__((aligned(sizeof(int32_t)*2*FRAME_LENGTH)));
-void gpio_callback(uint gpio, uint32_t events);
+
 
 /*
  * Global so that interrupt handlers have access
@@ -98,9 +101,12 @@ uint i2s_dma0_chan;
 uint i2s_dma1_chan;
 uint i2s_semaphore;
 uint adc_semaphore;
+bool gpio_isr_dot = false;
+bool gpio_isr_dash = false;
+
  
 /*
- * Global structures that enable the core-0 (DSP) to communicate with core-1 (UI)
+ * Global flags that enable the core-0 (DSP) to communicate with core-1 (UI)
  */
 const uint32_t uiAvgFilterIn    = 1;
 const uint32_t uiAvgFilterOut   = 2;
@@ -113,27 +119,21 @@ const uint32_t uiALEAutoNotch    = 8;
 const uint32_t uiALENoiseRed     = 9;
 const uint32_t uiCWOn            = 10;
 const uint32_t uiCWOff           = 11;
-const uint32_t uiCWDotOn         = 12;
-const uint32_t uiCWDotOff        = 13;
-const uint32_t uiCWDashOn        = 14;
-const uint32_t uiCWDashOff       = 15;
-const uint32_t uiCWDotDashOn     = 16;
-const uint32_t uiCWDotDashOff    = 17;
-const uint32_t uiCWDashDotOn     = 18;
-const uint32_t uiCWDashDotOff    = 19;
+const uint32_t uiVolume          = 12;
 
-
-spin_lock_t *lock;
 
 #ifdef PROFILE
 uint32_t time1, time2;
 #endif
+
 /*
- * The DMA interrupt handlers and the critical section object
+ * The interrupt handlers and the critical section objects
  */
 void dma_isr_0();
 void dma_isr_1();
-critical_section_t myCS;
+void gpio_isr(uint gpio, uint32_t events);
+critical_section_t core0_cs, core1_cs;
+spin_lock_t *lock;
 
 /*
  * All in global space so the spin-lock protects
@@ -166,13 +166,12 @@ q15_t lmsState[NLMS+FRAME_LENGTH];
 q15_t mu = (q15_t)(32768.0 * MU);
 arm_fir_instance_q15 DelayObj;
 arm_lms_norm_instance_q15 LMSFilterObj;
+cw_gen_obj STGenObj;
 
 /*
- * CW generator
+ * Volume conttrol
  */
-float32_t cwAmp = 0.1;
-uint32_t cwSpeed = 12;
-cw_gen_obj CWGenObj;
+float32_t volume;
 
 //-----------------------------------------------------------------------------------------------
 // CORE-1 MAIN ENTRY POINT                                                                       
@@ -189,11 +188,18 @@ void core1_main()
     float32_t Bt = 80;          // Hz transition bandwidth
     float32_t AdB = 50;         // dB stop-band attenuation
     uint32_t save;              // Used for the spin-lock
+    float32_t cwWPM;            // CW Words per minute
+
+  
+
+
 #ifdef PROFILE
     double timeAvailable_us = (FRAME_LENGTH/fs)*1.0E6;
 #endif
 
     printf("Core 1 up\n");
+
+    critical_section_init(&core1_cs);
     
     /*
      * Initial channel filter setup
@@ -215,29 +221,35 @@ void core1_main()
         gpio_set_dir(i, GPIO_IN);  
         gpio_pull_up(i);
     }
+    /*
+     * Initialise the Keyer GPIO output
+     * This is the DC key closure. It should be
+     * driven by DMA.
+     */
+    gpio_init(CW_KEYER_OUT_GPIO);
+    gpio_set_dir(CW_KEYER_OUT_GPIO, GPIO_OUT);
+    gpio_pull_up(CW_KEYER_OUT_GPIO);
 
     /*
      * Set up the callbacks for the GPIO IRQs
      */
-    gpio_set_irq_enabled_with_callback(AVG_FILTER_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+    gpio_set_irq_enabled_with_callback(AVG_FILTER_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &gpio_isr);
     gpio_set_irq_enabled(CH_FILTER_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(ALE_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
-    gpio_set_irq_enabled(ALE_MODE_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
-    gpio_set_irq_enabled(CW_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
-    gpio_set_irq_enabled(CW_KEYER_DOT_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
-    gpio_set_irq_enabled(CW_KEYER_DASH_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(ALE_MODE_GPIO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);    
+    gpio_set_irq_enabled(CW_KEYER_DOT_GPIO, GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(CW_KEYER_DASH_GPIO, GPIO_IRQ_EDGE_FALL, true);
+
 
     /*
      * Initialise the I2C interface and ADS1015 ADC and Zero the last ADC values
      */
     ads1015_init();  
     memset((void *)lastAdc, 0, sizeof(int16_t)*NUM_ADC_CH);
-
-    // Set the initial volume of the side-tone.
-    adc[2] = read_adc(2);
-    save = spin_lock_blocking(lock);
-    cwAmp = ST_VOL_MIN + ((float32_t)(adc[2]-ADC_MIN)/(float32_t)(ADC_MAX-ADC_MIN)) * (ST_VOL_MAX - ST_VOL_MIN);
-    spin_unlock(lock, save);
+    
+    // Set the initial CW keyer speed
+    //cwWPM = CW_WPM_MIN + ((float32_t)((float32_t)read_adc(2)-ADC2_MIN)/(float32_t)(ADC2_MAX-ADC2_MIN)) * (float32_t)(CW_WPM_MAX-CW_WPM_MIN); 
+    //volume = (float32_t)(read_adc(3)-ADC_MIN)/(float32_t)ADC_MAX;
 
     /*
      * Set the initial filters in/out according to pin states since the interrupts are edge-triggered
@@ -258,11 +270,6 @@ void core1_main()
         multicore_fifo_push_blocking(uiALEAutoNotch);
     else
         multicore_fifo_push_blocking(uiALENoiseRed);
-    if(!gpio_get(CW_GPIO))
-        multicore_fifo_push_blocking(uiCWOn);
-    else
-        multicore_fifo_push_blocking(uiCWOff);
-
     /*
      * MAIN PROCESSING LOOP FOR CORE 1.
      */
@@ -309,16 +316,62 @@ void core1_main()
             spin_unlock(lock, save);
             multicore_fifo_push_blocking(uiChFilterUpdate);
         }
-
-        // Side-tone volume control
+        
+        /*
+         * CW Iambic Electronic keyer
+         */
         if(adcChange[2])
+            cwWPM = CW_WPM_MIN + ((float32_t)((float32_t)adc[2]-ADC2_MIN)/(float32_t)(ADC2_MAX-ADC2_MIN)) * (float32_t)(CW_WPM_MAX-CW_WPM_MIN); 
+        uint32_t TeDot_us = (uint32_t)(60000000.0/(50.0*cwWPM));
+        uint32_t TeDash_us = (uint32_t)(180000000.0/(50.0*cwWPM));
+        uint32_t TeGap_us = (uint32_t)(60000000.0/(50.0*cwWPM));
+        if(gpio_isr_dot)
+        {
+            multicore_fifo_push_blocking(uiCWOn);            
+            gpio_put(CW_KEYER_OUT_GPIO, true);
+            sleep_us(TeDot_us);            
+            multicore_fifo_push_blocking(uiCWOff);            
+            gpio_put(CW_KEYER_OUT_GPIO, false);
+            sleep_us(TeGap_us);
+        }
+        gpio_isr_dot = gpio_get(CW_KEYER_DOT_GPIO) ? false : true;
+        
+        if(gpio_isr_dash)
+        {
+
+            multicore_fifo_push_blocking(uiCWOn);            
+            gpio_put(CW_KEYER_OUT_GPIO, true);
+            sleep_us(TeDash_us);
+            multicore_fifo_push_blocking(uiCWOff);            
+            gpio_put(CW_KEYER_OUT_GPIO, false);
+            sleep_us(TeGap_us);
+        }
+        gpio_isr_dash = gpio_get(CW_KEYER_DASH_GPIO) ? false : true;
+
+        // Straight key
+        if(!gpio_get(CW_GPIO))
+        {
+            multicore_fifo_push_blocking(uiCWOn);            
+            gpio_put(CW_KEYER_OUT_GPIO, true);
+        }
+        else
+        {
+            multicore_fifo_push_blocking(uiCWOff);            
+            gpio_put(CW_KEYER_OUT_GPIO, false);
+        }
+
+        /*
+         * Volume control
+         */
+        if(adcChange[3])
         {
             save = spin_lock_blocking(lock);
-            cwAmp = ST_VOL_MIN + ((float32_t)(adc[2]-ADC_MIN)/(float32_t)(ADC_MAX-ADC_MIN)) * (ST_VOL_MAX - ST_VOL_MIN);
-            spin_unlock(lock, save);
-
+            volume = (float32_t)(adc[3]-ADC_MIN)/(float32_t)ADC_MAX;
+            spin_unlock(lock, save);            
         }
-        
+
+
+        //sleep_ms(10);
 #ifdef PROFILE
         save = spin_lock_blocking(lock);
         int duration = time2-time1;
@@ -326,7 +379,7 @@ void core1_main()
         if (duration > 0)
             printf("DSP: %d us, utilisation = %1.1f %%\n", duration, 100.0*(double)duration/timeAvailable_us);
 #endif
-        sleep_ms(10);
+
     }    
 
     printf("Core 1 exiting\n");
@@ -362,6 +415,7 @@ void main()
     q15_t aleOut2[FRAME_LENGTH];
     q15_t cwOut[FRAME_LENGTH];
     q15_t *pOut;  // Equal either to tmp1 or tmp2. Used to find the output data
+    q15_t amp;
 
     // Flags to control the signal path.
     bool avgFilterIn = false;
@@ -369,20 +423,11 @@ void main()
     bool aleIn = false;
     bool aleAutoNotch = false;  // Either NOISE_RED or AUTO_NOTCH
     bool cwOn = false;
-
+    uint32_t cwWPM;
     stdio_init_all();
     setup_default_uart();
     lock = spin_lock_init(SPIN_LOCK_ID);
-    critical_section_init(&myCS);
-
-    /*
-     * Initialise the Keyer GPIO output
-     * This is the DC key closure. It should be
-     * driven by DMA.
-     */
-    gpio_init(CW_KEYER_OUT_GPIO);
-    gpio_set_dir(CW_KEYER_OUT_GPIO, GPIO_OUT);
-    gpio_pull_up(CW_KEYER_OUT_GPIO);
+    critical_section_init(&core0_cs);
    
     /*
      * Start the other core that deals with the UI
@@ -406,7 +451,7 @@ void main()
     /*
      * Initialise the CW keyer/side-tone
      */
-    init_cw(&CWGenObj, FS, ST_PITCH);
+    init_cw(&STGenObj, FS, ST_PITCH);
 
     /*
      * Set up the audio ADC
@@ -582,7 +627,7 @@ void main()
                 case uiCWOff:
                     cwOn = false;
                     break;
-
+   
                 // Invalid command - ignore
                 default:
                     break;
@@ -590,13 +635,13 @@ void main()
         }
 
         // Detect an edge on the ADC semaphore to detect an aDC DMA interrupt.
-        critical_section_enter_blocking(&myCS);
+        critical_section_enter_blocking(&core0_cs);
         if (adc_semaphore != my_adc_semaphore)
         {
             adc_isr_flag = true;
             my_adc_semaphore = adc_semaphore;
         }
-        critical_section_exit(&myCS);
+        critical_section_exit(&core0_cs);
 
         /*
         * If adc_semaphore==1, then assume that capture_buff[0..FRAME_LEN-1] contains
@@ -648,10 +693,10 @@ void main()
                     pOut = aleAutoNotch ? aleOut2 : aleOut1;
                 }
 
-                // CW Side-tone
-                if (cwOn)
+                // CW Side-tone    
+                if(cwOn)            
                 {
-                    gen_cw(&CWGenObj, pOut, cwOut, cwAmp, FRAME_LENGTH);
+                    gen_cw(&STGenObj, pOut, cwOut, ST_AMP, FRAME_LENGTH);
                     pOut = cwOut;
                 }
 
@@ -659,7 +704,11 @@ void main()
              * Output the signal to the I2S buffer
              */
             for(int i=0; i < FRAME_LENGTH; i++)
-                output_buff[output_base+i] = (int32_t)((pOut[i] << 16) | pOut[i]);   
+            {
+                q15_t x = (q15_t)((float32_t)pOut[i] * volume);
+                output_buff[output_base+i] = (int32_t)((x << 16) | x);
+            }
+                
 
 #ifdef PROFILE
             save = spin_lock_blocking(lock);
@@ -724,9 +773,9 @@ void dma_isr_1()
 }
 
 /*
- * GPIO callback (interrupt handler) called by CORE-1
+ * GPIO ISR Core-1)
  */
-void gpio_callback(uint gpio, uint32_t events)
+void gpio_isr(uint gpio, uint32_t events)
 {
 
     switch(gpio)
@@ -754,52 +803,16 @@ void gpio_callback(uint gpio, uint32_t events)
                 multicore_fifo_push_blocking(uiALEAutoNotch);
             if (gpio_get(ALE_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
                 multicore_fifo_push_blocking(uiALENoiseRed);
-            break;            
-        case CW_GPIO:
-            if (!gpio_get(CW_GPIO) && (events & GPIO_IRQ_EDGE_FALL))
-            {
-                //printf("CW on\n");
-                multicore_fifo_push_blocking(uiCWOn);
-            }
-            if (gpio_get(CW_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
-            {
-                //printf("CW off\n");
-                multicore_fifo_push_blocking(uiCWOff);
-            }
-            break;
+            break; 
         case CW_KEYER_DOT_GPIO:
-            if (!gpio_get(CW_KEYER_DOT_GPIO) && (events & GPIO_IRQ_EDGE_FALL))
-            {
-                if(!gpio_get(CW_KEYER_DASH_GPIO))
-                    multicore_fifo_push_blocking(uiCWDashDotOn);
-                else
-                    multicore_fifo_push_blocking(uiCWDotOn);
-            }
-            if (gpio_get(CW_KEYER_DOT_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
-            {
-                multicore_fifo_push_blocking(uiCWDotOff);
-                if(!gpio_get(CW_KEYER_DASH_GPIO))
-                    multicore_fifo_push_blocking(uiCWDashOn);
-            }
+            if (events & GPIO_IRQ_EDGE_FALL)
+                gpio_isr_dot = true;          
             break;
-
         case CW_KEYER_DASH_GPIO:
-            if (!gpio_get(CW_KEYER_DASH_GPIO) && (events & GPIO_IRQ_EDGE_FALL))
-            {
-                if(!gpio_get(CW_KEYER_DOT_GPIO))
-                    multicore_fifo_push_blocking(uiCWDotDashOn);
-                else
-                    multicore_fifo_push_blocking(uiCWDashOn);
-            }
-
-            if (gpio_get(CW_KEYER_DASH_GPIO) && (events & GPIO_IRQ_EDGE_RISE))
-            {
-                multicore_fifo_push_blocking(uiCWDashOff);
-                if(!gpio_get(CW_KEYER_DOT_GPIO))
-                    multicore_fifo_push_blocking(uiCWDotOn);  
-            }              
+            if (events & GPIO_IRQ_EDGE_FALL)
+                gpio_isr_dash = true;          
             break;
-
+ 
         default:
             printf("un-supported GPIO\n");
             break;

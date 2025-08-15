@@ -78,11 +78,9 @@
 #define AUTO_NOTCH 1     // ALE operates in auto-notch mode
 #define NORM_LMS 1
 #define ST_PITCH 800     // Side-tone pitch, Hz
-#define ST_AMP 0.05      // Amplitude of the side-tone
+#define ST_AMP 0.5      // Amplitude of the side-tone
 #define CW_WPM_MAX 40.0
 #define CW_WPM_MIN 5.0
-#define VOL_DB_MIN -50.0
-
 
 /*
  * The ADC data buffer, capture_buf (16 bit) and
@@ -121,8 +119,6 @@ const uint32_t uiALEAutoNotch    = 8;
 const uint32_t uiALENoiseRed     = 9;
 const uint32_t uiCWOn            = 10;
 const uint32_t uiCWOff           = 11;
-const uint32_t uiVolume          = 12;
-
 
 #ifdef PROFILE
 uint32_t time1, time2;
@@ -170,11 +166,6 @@ arm_fir_instance_q15 DelayObj;
 arm_lms_norm_instance_q15 LMSFilterObj;
 cw_gen_obj STGenObj;
 
-/*
- * Volume conttrol
- */
-float32_t volume;
-
 //-----------------------------------------------------------------------------------------------
 // CORE-1 MAIN ENTRY POINT                                                                       
 // Core 1 handles the user interface and creates the filter coefficients.  It passes commands
@@ -191,10 +182,6 @@ void core1_main()
     float32_t AdB = 50;         // dB stop-band attenuation
     uint32_t save;              // Used for the spin-lock
     float32_t cwWPM;            // CW Words per minute
-    float32_t amp_dB;
-
-  
-
 
 #ifdef PROFILE
     double timeAvailable_us = (FRAME_LENGTH/fs)*1.0E6;
@@ -363,19 +350,7 @@ void core1_main()
             gpio_put(CW_KEYER_OUT_GPIO, false);
         }
 
-        /*
-         * Volume control
-         */
-        if(adcChange[3])
-        {
-            amp_dB = VOL_DB_MIN *(1.0 -(float32_t)(adc[3])/(float32_t)ADC_MAX);
-            save = spin_lock_blocking(lock); 
-            volume = powf(10.0, amp_dB/20);
-            spin_unlock(lock, save);            
-        }
-
-        //printf("ADC0=%d, ADC1=%d, ADC2=%d, ADC3=%d\n", adc[0], adc[1], adc[2], adc[3]);
-        //sleep_ms(10);
+        sleep_ms(5);
 
 #ifdef PROFILE
         save = spin_lock_blocking(lock);
@@ -420,15 +395,14 @@ void main()
     q15_t aleOut2[FRAME_LENGTH];
     q15_t cwOut[FRAME_LENGTH];
     q15_t *pOut;  // Equal either to tmp1 or tmp2. Used to find the output data
-    q15_t amp;
-
+ 
     // Flags to control the signal path.
     bool avgFilterIn = false;
     bool chFilterIn = false;
     bool aleIn = false;
     bool aleAutoNotch = false;  // Either NOISE_RED or AUTO_NOTCH
     bool cwOn = false;
-    uint32_t cwWPM;
+
     stdio_init_all();
     setup_default_uart();
     lock = spin_lock_init(SPIN_LOCK_ID);
@@ -708,17 +682,9 @@ void main()
             /*
              * Output the signal to the I2S buffer
              */
-            /*
+            
             for(int i=0; i < FRAME_LENGTH; i++)
                 output_buff[output_base+i] = (int32_t)((pOut[i] << 16) | pOut[i]);
-            */
-
-            for(int i=0; i < FRAME_LENGTH; i++)
-            {
-                q15_t x = (q15_t)((float32_t)pOut[i] * volume);
-                output_buff[output_base+i] = (int32_t)((x << 16) | x);
-            }            
-
 #ifdef PROFILE
             save = spin_lock_blocking(lock);
             time2 = time_us_32();

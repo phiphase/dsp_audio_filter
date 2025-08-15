@@ -81,6 +81,8 @@
 #define ST_AMP 0.05      // Amplitude of the side-tone
 #define CW_WPM_MAX 40.0
 #define CW_WPM_MIN 5.0
+#define VOL_DB_MIN -50.0
+
 
 /*
  * The ADC data buffer, capture_buf (16 bit) and
@@ -189,6 +191,7 @@ void core1_main()
     float32_t AdB = 50;         // dB stop-band attenuation
     uint32_t save;              // Used for the spin-lock
     float32_t cwWPM;            // CW Words per minute
+    float32_t amp_dB;
 
   
 
@@ -340,10 +343,10 @@ void core1_main()
         {
 
             multicore_fifo_push_blocking(uiCWOn);            
-            gpio_put(CW_KEYER_OUT_GPIO, true);
+            gpio_put(CW_KEYER_OUT_GPIO, false);
             sleep_us(TeDash_us);
             multicore_fifo_push_blocking(uiCWOff);            
-            gpio_put(CW_KEYER_OUT_GPIO, false);
+            gpio_put(CW_KEYER_OUT_GPIO, true);
             sleep_us(TeGap_us);
         }
         gpio_isr_dash = gpio_get(CW_KEYER_DASH_GPIO) ? false : true;
@@ -365,13 +368,15 @@ void core1_main()
          */
         if(adcChange[3])
         {
-            save = spin_lock_blocking(lock);
-            volume = (float32_t)(adc[3]-ADC_MIN)/(float32_t)ADC_MAX;
+            amp_dB = VOL_DB_MIN *(1.0 -(float32_t)(adc[3])/(float32_t)ADC_MAX);
+            save = spin_lock_blocking(lock); 
+            volume = powf(10.0, amp_dB/20);
             spin_unlock(lock, save);            
         }
 
-
+        //printf("ADC0=%d, ADC1=%d, ADC2=%d, ADC3=%d\n", adc[0], adc[1], adc[2], adc[3]);
         //sleep_ms(10);
+
 #ifdef PROFILE
         save = spin_lock_blocking(lock);
         int duration = time2-time1;
@@ -703,12 +708,16 @@ void main()
             /*
              * Output the signal to the I2S buffer
              */
+            /*
+            for(int i=0; i < FRAME_LENGTH; i++)
+                output_buff[output_base+i] = (int32_t)((pOut[i] << 16) | pOut[i]);
+            */
+
             for(int i=0; i < FRAME_LENGTH; i++)
             {
                 q15_t x = (q15_t)((float32_t)pOut[i] * volume);
                 output_buff[output_base+i] = (int32_t)((x << 16) | x);
-            }
-                
+            }            
 
 #ifdef PROFILE
             save = spin_lock_blocking(lock);

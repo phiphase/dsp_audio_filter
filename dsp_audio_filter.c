@@ -48,6 +48,9 @@
 #define CW_KEYER_DOT_GPIO 8
 #define CW_KEYER_DASH_GPIO 9
 #define CW_KEYER_OUT_GPIO 10
+#define TUNE_GPIO 11
+#define LED1_GPIO 12
+#define LED2_GPIO 13
 #define I2S_DATA_GPIO 18  // Pin 24, 25, 26
 #define FRAME_LENGTH 128
 #define ADC_RING_BITS 8
@@ -205,12 +208,13 @@ void core1_main()
     /*
      * Set up GPIOs. They are on sequential pins
      */
-    for (int i=FC_AND_B_SEL_GPIO; i < (CW_KEYER_DASH_GPIO+1); i++)
+    for (int i=FC_AND_B_SEL_GPIO; i < (TUNE_GPIO+1); i++)
     {
         gpio_init(i);  
         gpio_set_dir(i, GPIO_IN);  
         gpio_pull_up(i);
     }
+
     /*
      * Initialise the Keyer GPIO output
      * This is the DC key closure. It should be
@@ -218,7 +222,13 @@ void core1_main()
      */
     gpio_init(CW_KEYER_OUT_GPIO);
     gpio_set_dir(CW_KEYER_OUT_GPIO, GPIO_OUT);
-    gpio_pull_up(CW_KEYER_OUT_GPIO);
+    //gpio_pull_up(CW_KEYER_OUT_GPIO);
+    gpio_init(LED1_GPIO);
+    gpio_set_dir(LED1_GPIO, GPIO_OUT);
+    gpio_put(LED1_GPIO, false);
+    gpio_init(LED2_GPIO);
+    gpio_set_dir(LED2_GPIO, GPIO_OUT);
+    gpio_put(LED2_GPIO, false);
 
     /*
      * Set up the callbacks for the GPIO IRQs
@@ -319,9 +329,11 @@ void core1_main()
         {
             multicore_fifo_push_blocking(uiCWOn);            
             gpio_put(CW_KEYER_OUT_GPIO, true);
+            gpio_put(LED1_GPIO, true);
             sleep_us(TeDot_us);            
             multicore_fifo_push_blocking(uiCWOff);            
             gpio_put(CW_KEYER_OUT_GPIO, false);
+            gpio_put(LED1_GPIO, false);
             sleep_us(TeGap_us);
         }
         gpio_isr_dot = gpio_get(CW_KEYER_DOT_GPIO) ? false : true;
@@ -331,9 +343,11 @@ void core1_main()
 
             multicore_fifo_push_blocking(uiCWOn);            
             gpio_put(CW_KEYER_OUT_GPIO, false);
+            gpio_put(LED1_GPIO, false);
             sleep_us(TeDash_us);
             multicore_fifo_push_blocking(uiCWOff);            
             gpio_put(CW_KEYER_OUT_GPIO, true);
+            gpio_put(LED1_GPIO, true);
             sleep_us(TeGap_us);
         }
         gpio_isr_dash = gpio_get(CW_KEYER_DASH_GPIO) ? false : true;
@@ -341,13 +355,29 @@ void core1_main()
         // Straight key
         if(!gpio_get(CW_GPIO))
         {
+            
             multicore_fifo_push_blocking(uiCWOn);            
             gpio_put(CW_KEYER_OUT_GPIO, true);
+            gpio_put(LED1_GPIO, true);
         }
         else
         {
             multicore_fifo_push_blocking(uiCWOff);            
             gpio_put(CW_KEYER_OUT_GPIO, false);
+            gpio_put(LED1_GPIO,false);
+        }
+
+        // Tune (no side-tone)
+        if(!gpio_get(TUNE_GPIO))
+        {
+            gpio_put(CW_KEYER_OUT_GPIO, true);
+            gpio_put(LED1_GPIO,true);
+
+        }
+        else
+        {
+            gpio_put(CW_KEYER_OUT_GPIO, false);
+            gpio_put(LED1_GPIO,false);
         }
 
         sleep_ms(5);

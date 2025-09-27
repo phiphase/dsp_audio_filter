@@ -39,6 +39,7 @@
 
 //#define PROFILE  // Enable printing of microseconds spent by core 0 doing DSP.
 #define ADC0_GPIO 26 // Pin 31
+#define INPUT_GAIN 0  // increments of 1 (6dB) so 1 is +6dB, 2 is +12db and so on.
 #define FC_AND_B_SEL_GPIO 2   // Take GPIO2 (pin 4) low to enable centre frequency/bandwidth control
 #define AVG_FILTER_GPIO 3
 #define CH_FILTER_GPIO 4
@@ -68,10 +69,8 @@
 #define F_MIN 300.0      // Minimum centre frequency
 #define B_MAX 3000.0     // Maximum bandwidth
 #define B_MIN 100.0      // Minimum bandwidth
-#define ADC_MAX 1635     // Maximum ADC output
-#define ADC_MIN 2        // Minimum ADC output
-#define ADC2_MAX 1631    // Maximum ADC output
-#define ADC2_MIN 0       // Minimum ADC output
+#define ADC_MAX 1639     // Maximum ADC output
+#define ADC_MIN 0       // Minimum ADC output
 #define ADC_HYSTERISIS 5 // The amount that the filter corner frequency ADCs have to change by
 #define MU 0.07         // LMS algorithm mu
 #define NLMS 32         // Number of taps for the LMS filter. Must be a multiple of 4.
@@ -81,10 +80,10 @@
 #define AUTO_NOTCH 1     // ALE operates in auto-notch mode
 #define NORM_LMS 1
 #define ST_PITCH 800     // Side-tone pitch, Hz
-#define ST_AMP 0.5      // Amplitude of the side-tone
+#define ST_VOL_MIN_DB -30  // dB minimum side-tone level, dB
 #define CW_WPM_MAX 40.0
 #define CW_WPM_MIN 5.0
-
+#define LED_PIN 25
 /*
  * The ADC data buffer, capture_buf (16 bit) and
  * the I2S output buffer (32 bit).
@@ -169,6 +168,12 @@ arm_fir_instance_q15 DelayObj;
 arm_lms_norm_instance_q15 LMSFilterObj;
 cw_gen_obj STGenObj;
 
+
+/*
+ * Side-tone volume
+ */
+float32_t stVol=0.5;
+
 //-----------------------------------------------------------------------------------------------
 // CORE-1 MAIN ENTRY POINT                                                                       
 // Core 1 handles the user interface and creates the filter coefficients.  It passes commands
@@ -220,9 +225,12 @@ void core1_main()
      * This is the DC key closure. It should be
      * driven by DMA.
      */
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+    gpio_put(LED_PIN, 0);
     gpio_init(CW_KEYER_OUT_GPIO);
     gpio_set_dir(CW_KEYER_OUT_GPIO, GPIO_OUT);
-    //gpio_pull_up(CW_KEYER_OUT_GPIO);
+    gpio_put(CW_KEYER_OUT_GPIO,false);
     gpio_init(LED1_GPIO);
     gpio_set_dir(LED1_GPIO, GPIO_OUT);
     gpio_put(LED1_GPIO, false);
@@ -248,8 +256,10 @@ void core1_main()
     memset((void *)lastAdc, 0, sizeof(int16_t)*NUM_ADC_CH);
     
     // Set the initial CW keyer speed
-    //cwWPM = CW_WPM_MIN + ((float32_t)((float32_t)read_adc(2)-ADC2_MIN)/(float32_t)(ADC2_MAX-ADC2_MIN)) * (float32_t)(CW_WPM_MAX-CW_WPM_MIN); 
+    //cwWPM = CW_WPM_MIN + ((float32_t)((float32_t)read_adc(2)-ADC2_MIN)/(float32_t)(ADC_MAX-ADC_MIN)) * (float32_t)(CW_WPM_MAX-CW_WPM_MIN); 
     //volume = (float32_t)(read_adc(3)-ADC_MIN)/(float32_t)ADC_MAX;
+
+
 
     /*
      * Set the initial filters in/out according to pin states since the interrupts are edge-triggered
@@ -270,6 +280,15 @@ void core1_main()
         multicore_fifo_push_blocking(uiALEAutoNotch);
     else
         multicore_fifo_push_blocking(uiALENoiseRed);
+
+    /*
+     * Set the initial side-tone volume
+     */    
+    save = spin_lock_blocking(lock);
+    float32_t dB = ST_VOL_MIN_DB *(1 - (float32_t)read_adc(3)/(float32_t)ADC_MAX);
+    stVol = powf(10.0,dB/20);
+    spin_unlock(lock, save);
+
     /*
      * MAIN PROCESSING LOOP FOR CORE 1.
      */
@@ -281,9 +300,13 @@ void core1_main()
             adcChange[n] = false;
             adc[n] = read_adc(n);  // Centre frequency
             if(abs(adc[n] - lastAdc[n]) > ADC_HYSTERISIS)
+            {
                 adcChange[n] = true;
-            lastAdc[n] = adc[n];
-        } 
+                lastAdc[n] = adc[n];
+            }            
+        }
+        printf("ADC0=%d, ADC1=%d, ADC2=%d, ADC3=%d\n", adc[0], adc[1], adc[2], adc[3]);
+        
 
         /*
          * Deal with ADC 0 (fL) and ADC 1 (fH) changes.
@@ -293,15 +316,15 @@ void core1_main()
             printf("ADC change\n");
             if (gpio_get(FC_AND_B_SEL_GPIO)==0)
             {
-                float fc = F_MIN + ((float)(adc[0]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (F_MAX- F_MIN);
-                float bw = B_MIN + ((float)(adc[1]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(B_MAX-B_MIN);
+                float fc = F_MIN + ((float32_t)adc[0]/(float32_t)ADC_MAX) * (F_MAX- F_MIN);
+                float bw = B_MIN + ((float32_t)adc[1]/(float32_t)ADC_MAX) * (float32_t)(B_MAX-B_MIN);
                 fL = fc - bw/2;
                 fH = fc + bw/2;
             }
             else
             {
-                fL = F_MIN + ((float)(adc[0]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(F_MAX-F_MIN);
-                fH = F_MIN + ((float)(adc[1]-ADC_MIN)/(float)(ADC_MAX-ADC_MIN)) * (float)(F_MAX-F_MIN);
+                fL = F_MIN + ((float32_t)adc[0]/(float32_t)ADC_MAX) * (float32_t)(F_MAX-F_MIN);
+                fH = F_MIN + ((float32_t)adc[1]/(float32_t)ADC_MAX) * (float32_t)(F_MAX-F_MIN);
             }
             // Put limits on fL and fH.
             fL = fL < F_MIN ? F_MIN:fL;
@@ -316,12 +339,23 @@ void core1_main()
             spin_unlock(lock, save);
             multicore_fifo_push_blocking(uiChFilterUpdate);
         }
-        
+       
+        /*
+         * Side-tone volume
+         */
+        if (adcChange[3])
+        {
+            save = spin_lock_blocking(lock);
+            float32_t dB = ST_VOL_MIN_DB *(1 - (float32_t)adc[3]/(float32_t)ADC_MAX);
+            stVol = powf(10.0,dB/20);
+            spin_unlock(lock, save);
+        }
+
         /*
          * CW Iambic Electronic keyer
          */
         if(adcChange[2])
-            cwWPM = CW_WPM_MIN + ((float32_t)((float32_t)adc[2]-ADC2_MIN)/(float32_t)(ADC2_MAX-ADC2_MIN)) * (float32_t)(CW_WPM_MAX-CW_WPM_MIN); 
+            cwWPM = CW_WPM_MIN + ((float32_t)((float32_t)adc[2]-ADC_MIN)/(float32_t)(ADC_MAX-ADC_MIN)) * (float32_t)(CW_WPM_MAX-CW_WPM_MIN); 
         uint32_t TeDot_us = (uint32_t)(60000000.0/(50.0*cwWPM));
         uint32_t TeDash_us = (uint32_t)(180000000.0/(50.0*cwWPM));
         uint32_t TeGap_us = (uint32_t)(60000000.0/(50.0*cwWPM));
@@ -359,12 +393,14 @@ void core1_main()
             multicore_fifo_push_blocking(uiCWOn);            
             gpio_put(CW_KEYER_OUT_GPIO, true);
             gpio_put(LED1_GPIO, true);
+            gpio_put(LED_PIN, 1);
         }
         else
         {
             multicore_fifo_push_blocking(uiCWOff);            
             gpio_put(CW_KEYER_OUT_GPIO, false);
             gpio_put(LED1_GPIO,false);
+            gpio_put(LED_PIN, 0);
         }
 
         // Tune (no side-tone)
@@ -374,11 +410,7 @@ void core1_main()
             gpio_put(LED1_GPIO,true);
 
         }
-        else
-        {
-            gpio_put(CW_KEYER_OUT_GPIO, false);
-            gpio_put(LED1_GPIO,false);
-        }
+
 
         sleep_ms(5);
 
@@ -676,7 +708,7 @@ void main()
              * Shift the 12-bit input signal to 16 bits (1.15 format).
              */
             for(int i=0; i < FRAME_LENGTH; i++)
-                tmp1[i] = capture_buff[capture_base+i] << 3;
+                tmp1[i] = capture_buff[capture_base+i] << INPUT_GAIN;
 
                 // Averaging Filter
                 if (avgFilterIn)                
@@ -705,7 +737,7 @@ void main()
                 // CW Side-tone    
                 if(cwOn)            
                 {
-                    gen_cw(&STGenObj, pOut, cwOut, ST_AMP, FRAME_LENGTH);
+                    gen_cw(&STGenObj, pOut, cwOut, stVol, FRAME_LENGTH);
                     pOut = cwOut;
                 }
 

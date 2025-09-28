@@ -1,0 +1,89 @@
+;--------------------------------------------------------------------------------------------------
+; Copyright (C) 2025 Adrian P. Nash, G4ZHZ
+; PIO program file to implement an I2S output
+; Based on the Rasberry Pi Pico i2s audio
+;
+; Transmit a mono or stereo I2S audio stream as stereo
+; This is 16 bits per sample; can be altered by modifying the "set" params,
+; or made programmable by replacing "set x" with "mov x, y" and using Y as a config register.
+;
+; Autopull must be enabled, with threshold set to 32.
+; Since I2S is MSB-first, shift direction should be to left.
+; Hence the format of the FIFO word is:
+;
+; | 31   :   16 | 15   :    0 |
+; | sample ws=0 | sample ws=1 |
+;
+; Data is output at 1 bit per clock. Use clock divider to adjust frequency.
+; Fractional divider will probably be needed to get correct bit clock period,
+; but for common sysclk freqs this should still give a constant word select period.
+;
+; One output pin is used for the data output.
+; Two side-set pins are used for bit-clock (BCLK) and Left/Right clock (LRCLK)
+;
+; Send 16 bit words to the PIO for mono, 32 bit words for stereo. For mono,
+; 32 bits are pulled and output, but this is two samples.
+;
+; Repeatedly get one word of data from the TX FIFO, stalling when the FIFO is
+; empty. Write the least significant bit to the OUT pin group.
+;--------------------------------------------------------------------------------------------------
+.program i2s
+.side_set 2
+                      ;      +--- LRCLK pin 20
+                      ;      |+-- BCLK pin 19
+                      ;      ||
+bitloop1:
+    out pins, 1       side 0b10
+    jmp x-- bitloop1  side 0b11
+    out pins, 1       side 0b00
+    set x, 14         side 0b01
+bitloop0:
+    out pins, 1       side 0b00
+    jmp x-- bitloop0  side 0b01
+    out pins, 1       side 0b10
+public entry_point:
+    set x, 14         side 0b11    
+
+% c-sdk {
+static inline void i2s_program_init(PIO pio, uint sm, uint offset, uint pin, uint bitRate)
+{
+    pio_sm_config c = i2s_program_get_default_config(offset);
+
+    // Tell the SM first pin that is used for side-set.
+    sm_config_set_sideset_pins(&c, pin+1);
+
+    // This needs to be used for the non side-set pin(s) only
+    sm_config_set_out_pins(&c, pin, 1);
+
+    // Set this pin's GPIO function (connect PIO to the pads)
+    // pio_gpio_init() calls ARE needed for side-set pins
+    pio_gpio_init(pio, pin);   
+    pio_gpio_init(pio, pin+1);
+    pio_gpio_init(pio, pin+2);
+
+    // Set the pin direction to output at the PIO. This includes
+    // ALL pins including side-set pins.
+    // NB: This assumes that the side-set pins are consecutive with
+    // the data pin.
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 3, true);
+
+    // Shift 32 bits out when pulling, shifting left. autoPull enabled (DMA), 32 bits shifted out
+    // before the next pull.
+    sm_config_set_out_shift(&c, false, true, 32);
+
+    // Set the clock division so the pulses happen slower. The int/Fractional
+    // version is used.
+    float div = (float)clock_get_hz(clk_sys) / (float)bitRate;
+    uint32_t div_int = (int)div;
+    uint8_t div_frac = (div-(float)div_int)*256;
+    sm_config_set_clkdiv_int_frac8 (&c, div_int, div_frac); 
+
+    // Load our configuration, and jump to the start of the program
+    pio_sm_init(pio, sm, offset, &c);
+
+    // Set the state machine running. This is needed even for autoPull
+    // and a pio_sm_exec() call.
+    pio_sm_set_enabled(pio, sm, true);
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + i2s_offset_entry_point));
+}
+%}

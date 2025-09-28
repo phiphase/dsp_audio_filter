@@ -1,3 +1,5 @@
+# G4ZHZ DSP AUDIO FILTER
+
 This DSP audio filter project has been developed to provide:
 - Variable bandwidth audio filtering (e.g. for CW or interference reduction)
 - Automatic Line Enhancement (ALE) for noise reduction or tone elimination
@@ -18,6 +20,7 @@ The PICO-2's 12-bit internal ADC is used for audio input. DMA channels, double b
 message-posting FIFO are used, so the DSP CPU is only loaded to around 4% leaving loads of processing capability for other DSP
 tasks like FFT/IFFT or advanced noise reduction in the future. One processor core does the DSP. The other does the user interface.
 
+## SPECIFICATIONS
 The specifications are as follows:
 
 Audio filter in/out
@@ -36,6 +39,7 @@ Power, 3-12 V. PP3 9V battery or external power via 2.5mm DC jack
 
 Current (headphones) ~24 mA
 
+## FRONT PANEL
 Front Panel Controls and indicators:
 - Power On/off
 - Filter In/Out
@@ -49,6 +53,7 @@ Front Panel Controls and indicators:
 - Filter in LED (Yellow)
 - ALE in LED (Yellow)
 
+## REAR PANEL
 Read Panel Connectors
 - 2.5mm DC Jack centre +, 3V - 12V, 100mA maximum
 - 3.5mm Audio in (~600 Ohm)
@@ -57,4 +62,11 @@ Read Panel Connectors
 - 3.5mm Paddle in: Dot on tip, Dash on ring
 - 3.5mm Key out
 - RCA Phono External speaker out (8 Ohm)
+
+## BLOCK DIAGRAM
+Below is the block diagram of the DSP audio filter.
+
+<img width="4512" height="3064" alt="image" src="https://github.com/user-attachments/assets/ea97d940-51c5-4123-85bd-feb25c82b5c4" />
+
+
 

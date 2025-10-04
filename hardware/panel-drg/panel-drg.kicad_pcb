@@ -199,16 +199,6 @@
 		(uuid "838cba31-9a5f-44ab-a268-7cd1e0d6b023")
 	)
 	(gr_line
-		(start 150 16.5)
-		(end 150 49)
-		(stroke
-			(width 0.1)
-			(type default)
-		)
-		(layer "Dwgs.User")
-		(uuid "8d42dfa1-5f87-4941-ac32-f0fb383caa9b")
-	)
-	(gr_line
 		(start 85 178.5)
 		(end 85 137.5)
 		(stroke
@@ -250,7 +240,7 @@
 	)
 	(gr_line
 		(start 142.5 89.5)
-		(end 142.5 57)
+		(end 142.5 16.5)
 		(stroke
 			(width 0.1)
 			(type default)
@@ -408,8 +398,8 @@
 		(uuid "ad27a189-edb6-41a4-8d9e-bcad87f038a9")
 	)
 	(gr_circle
-		(center 150 47)
-		(end 151.25 47)
+		(center 142.5 47)
+		(end 143.75 47)
 		(stroke
 			(width 0.1)
 			(type solid)
@@ -722,7 +712,7 @@
 		)
 	)
 	(gr_text "d 2.5"
-		(at 150.5 44 0)
+		(at 143.5 44 0)
 		(layer "Dwgs.User")
 		(uuid "dd50a9d2-26a7-4b43-be53-0edf1008f527")
 		(effects
@@ -1370,7 +1360,7 @@
 		(layer "Dwgs.User")
 		(uuid "cd463e4c-3002-4037-8ec4-3f0dcff9b8c6")
 		(pts
-			(xy 50 16.5) (xy 150 16.5)
+			(xy 50 16.5) (xy 142.5 16.5)
 		)
 		(height 0)
 		(orientation 0)
@@ -1391,8 +1381,8 @@
 			(extension_offset 0.5)
 			(keep_text_aligned yes)
 		)
-		(gr_text "100"
-			(at 100 15.35 0)
+		(gr_text "92.5"
+			(at 96.25 15.35 0)
 			(layer "Dwgs.User")
 			(uuid "cd463e4c-3002-4037-8ec4-3f0dcff9b8c6")
 			(effects

@@ -65,10 +65,10 @@
 #define SPIN_LOCK_ID 1
 #define NAVG 4           // No. averages. must be even and a multiple of 4.
 #define NUM_ADC_CH 4     // Number of ADC channels
-#define F_MAX 3600.0     // Maximum centre frequency
-#define F_MIN 300.0      // Minimum centre frequency
-#define B_MAX 3000.0     // Maximum bandwidth
-#define B_MIN 100.0      // Minimum bandwidth
+#define F_MAX 2000.0     // Maximum centre frequency
+#define F_MIN 0.0      // Minimum centre frequency
+#define B_MAX 2000.0     // Maximum bandwidth
+#define B_MIN 0.0      // Minimum bandwidth
 #define ADC_MAX 1639     // Maximum ADC output
 #define ADC_MIN 0       // Minimum ADC output
 #define ADC_HYSTERISIS 5 // The amount that the filter corner frequency ADCs have to change by
@@ -81,7 +81,7 @@
 #define NORM_LMS 1
 #define ST_PITCH 800     // Side-tone pitch, Hz
 #define ST_VOL_MIN_DB -30  // dB minimum side-tone level, dB
-#define CW_WPM_MAX 40.0
+#define CW_WPM_MAX 55.0
 #define CW_WPM_MIN 5.0
 #define LED_PIN 25
 /*

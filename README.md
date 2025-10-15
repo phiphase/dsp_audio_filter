@@ -2,7 +2,7 @@
 
 This DSP audio filter project has been developed to provide:
 - Variable bandwidth audio filtering (e.g. for CW or interference reduction)
-- Automatic Line Enhancement (ALE) for noise reduction or tone elimination
+- Automatic Line Enhancement (ALE) for noise reduction or automatich notch filtering
 - CW sidetone generation
 - Electronic paddle keyer for CW.
 
@@ -25,15 +25,15 @@ The specifications are as follows:
 
 Audio filter in/out
 Audio filter can either operate as fL (low frequency) or fH (high frequency) or in fc (centre frequency) and bandwidth (BW).
-- Frequency range: 300-3300 Hz
-- Bandwidth range: 50 Hz to 3000 Hz
+- Frequency range (FC): 0-2000 Hz
+- Bandwidth range (BW): 0-2000 Hz
 
 Automatic Line Enhancer (ALE) in/out
-ALE operates either in noise reduction mode or automatic tone cancelling mode.
+ALE operates either in noise reduction (NR) mode or automatic notch cancelling (AN) mode.
 
 800 Hz CW side tone. Volume internally adjustable
 
-CW Keyer: 5-50WPM
+CW Keyer: 5-55WPM
 
 Power, 3-12 V. PP3 9V battery or external power via 2.5mm DC jack
 
@@ -45,13 +45,12 @@ Front Panel Controls and indicators:
 - Filter In/Out
 - ALE In/Out
 - Tune (CW output on)
-- Audio filter fL/fc analogue control 300-3300 Hz
-- Audio filter fH/BW analogue control 300-3300 Hz
-- CW Keyer speed 5-50 WPM.
+- Audio filter centre frequency (FC) analogue control 0-2000 Hz
+- Audio filter badwidth (BW) analogue control 300-3300 Hz
+- CW Keyer speed 5-55 WPM.
 - Power ON LED (Green)
 - CW Keyed LED (Red)
-- Filter in LED (Yellow)
-- ALE in LED (Yellow)
+
 
 ## REAR PANEL
 Read Panel Connectors
@@ -68,5 +67,9 @@ Below is the block diagram of the DSP audio filter.
 
 <img width="4512" height="3064" alt="image" src="https://github.com/user-attachments/assets/ea97d940-51c5-4123-85bd-feb25c82b5c4" />
 
-
-
+## PHOTOS
+Below are some photos of the finished DSP audio filter.
+![20251014_221011](https://github.com/user-attachments/assets/fc971698-db09-4ba0-b9a3-33f07d74c2da)
+![20251014_221031](https://github.com/user-attachments/assets/8a0bb6a7-eba8-4af0-a554-8d81f498e0d7)
+![20251014_221043](https://github.com/user-attachments/assets/32d21914-bdb2-434a-b174-c0aac0436e3e)
+![20251015_191848](https://github.com/user-attachments/assets/58642834-510d-435b-9d93-0bf74ced642b)

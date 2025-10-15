@@ -72,6 +72,7 @@ This MK-1 version is intended to be built on Verboard. It is pretty straightforw
 So, having built the prototype, the following advice is given.
 * Use headers and leads (available from the Pihut)
 * Make sure the Verboard is large enough to hold all the modules (the board I used was a little small).
+* Make sure the box is large enough. Mine wasn't.
 * Panel mount all the controls.
 * Do fit the RF filters on the rear panel connections
 * Make sure you use a conductive (Aluminium) box. The box I used appeared to have some sort of insulating coating on it so I had to use a needle file to remove the coating to get an electrical contact!

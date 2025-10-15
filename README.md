@@ -24,7 +24,7 @@ tasks like FFT/IFFT or advanced noise reduction in the future. One processor cor
 The specifications are as follows:
 
 Audio filter in/out
-Audio filter can either operate as fL (low frequency) or fH (high frequency) or in fc (centre frequency) and bandwidth (BW).
+Audio filter can either operate as fL (low frequency) or fH (high frequency) or in FC (centre frequency) and bandwidth (BW).
 - Frequency range (FC): 0-2000 Hz
 - Bandwidth range (BW): 0-2000 Hz
 
@@ -46,7 +46,7 @@ Front Panel Controls and indicators:
 - ALE In/Out
 - Tune (CW output on)
 - Audio filter centre frequency (FC) analogue control 0-2000 Hz
-- Audio filter badwidth (BW) analogue control 300-3300 Hz
+- Audio filter badwidth (BW) analogue control 0-2000 Hz
 - CW Keyer speed 5-55 WPM.
 - Power ON LED (Green)
 - CW Keyed LED (Red)

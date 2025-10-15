@@ -83,7 +83,7 @@ So, having built the prototype, the following advice is given.
 * Make sure the Pico-2 module's USB and debug connectors can be easily accessed.
 
 ## PROGRAMMING
-It is probably best to follow the Pico-2 getting started guide https://datasheets.raspberrypi.com/pico/getting-started-with-pico.pdf. Start by installing Microsoft VS Code. Instal the Pico project plug-in, clone the software repo and compile/install the code. You'll need to flash the Pico-2 using the USB cable. Alternatively, download dsp_audio_filter_build.zip, de-compress it and use your favourite tool to upload to the target.
+It is probably best to follow the Pico-2 getting started guide https://datasheets.raspberrypi.com/pico/getting-started-with-pico.pdf. Start by installing Microsoft VS Code. Install the Pico project plug-in, clone the software repo and compile/install the code. You'll need to flash the Pico-2 using the USB cable. Alternatively, download dsp_audio_filter_build.zip, de-compress it and use your favourite tool to upload to the target. There are numerous web-sites that show you how to upload the binaries to a Rasberry Pi Pico board.
 
 ## PHOTOS
 Below are some photos of the finished DSP audio filter.

@@ -82,6 +82,7 @@ So, having built the prototype, the following advice is given.
 * For the front and rear panel legends I used transparent Gekko paper that enables the legends to be printed using an ink-jet printer. However, cut each legend out individually and carefully place on the drilled but un-fitted panels if possible. Don't do what I did and print the whole front and rear panels on Gekko paper!
 * If possible, wire up and fit the panel components to the panels before fitting the panels and wiring it all up i.e. use separate panels.
 * Make sure the Pico-2 module's USB and debug connectors can be easily accessed.
+* The loud speaker makes a hell of a lot of RFI. Being Class-D it relies on the high frequency PWM switching to operate. A subsequent revision won't use it. Use headphones.
 
 ## PROGRAMMING
 It is probably best to follow the Pico-2 getting started guide https://datasheets.raspberrypi.com/pico/getting-started-with-pico.pdf. Start by installing Microsoft VS Code. Install the Pico project plug-in, clone the software repo and compile/install the code. You'll need to flash the Pico-2 using the USB cable. Alternatively, download dsp_audio_filter_build.zip, de-compress it and use your favourite tool to upload to the target. There are numerous web-sites that show you how to upload the binaries to a Rasberry Pi Pico board.

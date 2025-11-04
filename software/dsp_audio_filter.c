@@ -66,11 +66,11 @@
 #define NAVG 4           // No. averages. must be even and a multiple of 4.
 #define NUM_ADC_CH 4     // Number of ADC channels
 #define F_MAX 2000.0     // Maximum centre frequency
-#define F_MIN 0.0      // Minimum centre frequency
+#define F_MIN 200.0      // Minimum centre frequency
 #define B_MAX 2000.0     // Maximum bandwidth
-#define B_MIN 0.0      // Minimum bandwidth
-#define ADC_MAX 1639     // Maximum ADC output
-#define ADC_MIN 0       // Minimum ADC output
+#define B_MIN 200.0      // Minimum bandwidth
+#define ADC_MAX 1645.0   // Maximum ADC output
+#define ADC_MIN 0.0      // Minimum ADC output
 #define ADC_HYSTERISIS 5 // The amount that the filter corner frequency ADCs have to change by
 #define MU 0.07         // LMS algorithm mu
 #define NLMS 32         // Number of taps for the LMS filter. Must be a multiple of 4.
@@ -81,8 +81,8 @@
 #define NORM_LMS 1
 #define ST_PITCH 800     // Side-tone pitch, Hz
 #define ST_VOL_MIN_DB -30  // dB minimum side-tone level, dB
-#define CW_WPM_MAX 55.0
-#define CW_WPM_MIN 5.0
+#define CW_WPM_MAX 50.0
+#define CW_WPM_MIN 10.0
 #define LED_PIN 25
 /*
  * The ADC data buffer, capture_buf (16 bit) and
@@ -305,7 +305,9 @@ void core1_main()
                 lastAdc[n] = adc[n];
             }            
         }
+        #ifdef DO_PRINTF
         printf("ADC0=%d, ADC1=%d, ADC2=%d, ADC3=%d\n", adc[0], adc[1], adc[2], adc[3]);
+        #endif
         
 
         /*
@@ -313,7 +315,9 @@ void core1_main()
          */
         if(adcChange[0] || adcChange[1])
         {
+            #ifdef DO_PRINTF
             printf("ADC change\n");
+            #endif
             if (gpio_get(FC_AND_B_SEL_GPIO)==0)
             {
                 float fc = F_MIN + ((float32_t)adc[0]/(float32_t)ADC_MAX) * (F_MAX- F_MIN);
@@ -355,7 +359,9 @@ void core1_main()
          * CW Iambic Electronic keyer
          */
         if(adcChange[2])
-            cwWPM = CW_WPM_MIN + ((float32_t)((float32_t)adc[2]-ADC_MIN)/(float32_t)(ADC_MAX-ADC_MIN)) * (float32_t)(CW_WPM_MAX-CW_WPM_MIN); 
+        {
+            cwWPM = CW_WPM_MIN + ((float32_t)adc[2]/(float32_t)ADC_MAX) * (float32_t)(CW_WPM_MAX-CW_WPM_MIN);             
+        }
         uint32_t TeDot_us = (uint32_t)(60000000.0/(50.0*cwWPM));
         uint32_t TeDash_us = (uint32_t)(180000000.0/(50.0*cwWPM));
         uint32_t TeGap_us = (uint32_t)(60000000.0/(50.0*cwWPM));
@@ -374,14 +380,13 @@ void core1_main()
         
         if(gpio_isr_dash)
         {
-
             multicore_fifo_push_blocking(uiCWOn);            
-            gpio_put(CW_KEYER_OUT_GPIO, false);
-            gpio_put(LED1_GPIO, false);
-            sleep_us(TeDash_us);
-            multicore_fifo_push_blocking(uiCWOff);            
             gpio_put(CW_KEYER_OUT_GPIO, true);
             gpio_put(LED1_GPIO, true);
+            sleep_us(TeDash_us);
+            multicore_fifo_push_blocking(uiCWOff);            
+            gpio_put(CW_KEYER_OUT_GPIO, false);
+            gpio_put(LED1_GPIO, false);
             sleep_us(TeGap_us);
         }
         gpio_isr_dash = gpio_get(CW_KEYER_DASH_GPIO) ? false : true;
@@ -419,12 +424,18 @@ void core1_main()
         int duration = time2-time1;
         spin_unlock(lock, save);
         if (duration > 0)
+        {
+            #ifdef DO_PRINTF       
             printf("DSP: %d us, utilisation = %1.1f %%\n", duration, 100.0*(double)duration/timeAvailable_us);
+            #endif
+        }
 #endif
 
     }    
 
+    #ifdef DO_PRINTF
     printf("Core 1 exiting\n");
+    #endif
     sleep_ms(1000);
     return;
 }
@@ -851,7 +862,9 @@ void gpio_isr(uint gpio, uint32_t events)
             break;
  
         default:
+            #ifdef DO_PRINTF
             printf("un-supported GPIO\n");
+            #endif
             break;
     }
 }

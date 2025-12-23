@@ -6,8 +6,8 @@
 	(paper "A3")
 	(title_block
 		(title "DSP Audio Filter")
-		(date "2025-10-15")
-		(rev "|A")
+		(date "2025-12-23")
+		(rev "A.5")
 		(company "Adrian Nash, G4ZHZ")
 	)
 	(lib_symbols
@@ -9156,7 +9156,7 @@
 	)
 	(wire
 		(pts
-			(xy 40.64 107.95) (xy 60.96 107.95)
+			(xy 40.64 107.95) (xy 72.39 107.95)
 		)
 		(stroke
 			(width 0)
@@ -9783,16 +9783,6 @@
 			(type default)
 		)
 		(uuid "ad47bdaa-ea99-43a8-b582-237bc35150ae")
-	)
-	(wire
-		(pts
-			(xy 68.58 107.95) (xy 72.39 107.95)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "ad6327e6-290e-46e1-983d-d1d948ddedff")
 	)
 	(wire
 		(pts
@@ -12431,74 +12421,6 @@
 			(project "audio filter"
 				(path "/07ca0058-fccf-4127-8cf6-d53d8308f6c1"
 					(reference "#PWR022")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:L")
-		(at 64.77 107.95 90)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board no)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "2610edaf-8cf9-4d4b-9d04-67f379884768")
-		(property "Reference" "L6"
-			(at 64.77 102.87 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "10u"
-			(at 64.77 105.41 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 64.77 107.95 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 64.77 107.95 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Inductor"
-			(at 64.77 107.95 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "2"
-			(uuid "9517cebf-df90-4c27-aa44-8315748d0601")
-		)
-		(pin "1"
-			(uuid "d11edf0b-9c1e-44dd-bf0d-fdd0beec5e14")
-		)
-		(instances
-			(project "audio filter"
-				(path "/07ca0058-fccf-4127-8cf6-d53d8308f6c1"
-					(reference "L6")
 					(unit 1)
 				)
 			)
